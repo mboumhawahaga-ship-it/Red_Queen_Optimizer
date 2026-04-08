@@ -29,3 +29,9 @@ variable "quarantine_lambda_arn" {
   description = "ARN de la Lambda de quarantaine (stop instance uniquement, jamais suppression)"
   type        = string
 }
+
+variable "max_budget" {
+  description = "Seuil budgétaire mensuel en USD transmis à la Lambda de quarantaine"
+  type        = number
+  default     = 100
+}

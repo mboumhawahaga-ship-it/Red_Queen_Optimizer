@@ -60,7 +60,14 @@ resource "aws_sfn_state_machine" "tagging_governance" {
       QuarantineResource = {
         Type     = "Task"
         Resource = "arn:aws:states:::lambda:invoke"
-        Parameters = { FunctionName = var.quarantine_lambda_arn, "Payload.$" = "$" }
+        Parameters = {
+          FunctionName = var.quarantine_lambda_arn
+          Payload = {
+            "input.$"    = "$"
+            "max_budget" = var.max_budget
+            "dry_run"    = var.dry_run
+          }
+        }
         ResultPath = "$.quarantine_result"
         End        = true
       }

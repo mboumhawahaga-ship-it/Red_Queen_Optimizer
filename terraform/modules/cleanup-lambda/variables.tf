@@ -4,6 +4,12 @@ variable "environment" {
   default     = "dev"
 }
 
+variable "aws_region" {
+  description = "Région AWS de déploiement"
+  type        = string
+  default     = "eu-west-1"
+}
+
 variable "grace_period_hours" {
   description = "Période de grâce avant suppression (en heures)"
   type        = number

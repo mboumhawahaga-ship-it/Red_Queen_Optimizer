@@ -6,8 +6,8 @@ module "cleanup_lambda" {
   source = "../../modules/cleanup-lambda"
 
   environment = "dev"
+  aws_region  = "eu-west-1"
 
-  # Période de grâce avant suppression (24h par défaut)
   grace_period_hours = 24
 
   # MODE IMPORTANT : Simulation par défaut !

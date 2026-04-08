@@ -4,6 +4,12 @@ variable "environment" {
   default     = "dev"
 }
 
+variable "aws_region" {
+  description = "Région AWS de déploiement"
+  type        = string
+  default     = "eu-west-1"
+}
+
 variable "enable_schedule" {
   description = "Activer l'execution automatique planifiee"
   type        = bool

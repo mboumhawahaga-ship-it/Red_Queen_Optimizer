@@ -8,6 +8,7 @@ module "metrics_lambda" {
   source = "../../modules/metrics-lambda"
 
   environment = "dev"
+  aws_region  = "eu-west-1"
 
   # Planification : toutes les 6 heures
   enable_schedule     = true
