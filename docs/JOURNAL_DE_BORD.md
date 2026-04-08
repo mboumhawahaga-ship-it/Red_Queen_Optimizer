@@ -425,4 +425,116 @@ terraform destroy -auto-approve
 
 ---
 
+---
+
+## Amelioration #4 - Ajout module EventBridge + Step Function (08/04/2026)
+
+| | |
+|---|---|
+| **Modules crees** | `terraform/modules/eventbridge/`, `terraform/modules/step-function/` |
+| **Fichier env** | `terraform/environments/dev/governance.tf` |
+
+### Ce qui a ete fait
+
+**Module `step-function`** : orchestre la remediation en 4 etats :
+```
+NotifyOwner → WaitGracePeriod (24h) → CheckCompliance → QuarantineResource
+```
+Action finale : STOP de l'instance uniquement, pas de suppression.
+
+**Module `eventbridge`** : ecoute les evenements AWS Config et declenche la Step Function :
+```json
+{
+  "source": ["aws.config"],
+  "detail-type": ["Config Rules Compliance Change"],
+  "detail": { "newEvaluationResult": { "complianceType": ["NON_COMPLIANT"] } }
+}
+```
+
+### Erreur rencontree - variable `max_budget` inconnue
+
+| | |
+|---|---|
+| **Erreur** | `An argument named "max_budget" is not expected here` |
+| **Cause** | `max_budget = 100` ajoute dans `governance.tf` mais variable absente du module `step-function` |
+| **Fichiers** | `terraform/modules/step-function/variables.tf` + `main.tf` |
+
+### Solution
+
+Ajouter la variable dans le module et la transmettre en payload a la Lambda de quarantaine :
+
+```hcl
+# variables.tf
+variable "max_budget" {
+  description = "Seuil budgetaire mensuel en USD transmis a la Lambda de quarantaine"
+  type        = number
+  default     = 100
+}
+```
+
+```hcl
+# main.tf - etat QuarantineResource
+Parameters = {
+  FunctionName = var.quarantine_lambda_arn
+  Payload = {
+    "input.$"    = "$"
+    "max_budget" = var.max_budget
+    "dry_run"    = var.dry_run
+  }
+}
+```
+
+La logique de comparaison (coût > max_budget → quarantaine) reste dans la Lambda via `event["max_budget"]`.
+
+### Regle a retenir
+> Terraform ne peut pas evaluer des valeurs runtime (couts AWS en temps reel) dans une definition Step Function.
+> La bonne pratique : passer le seuil comme parametre au payload Lambda, qui applique la logique conditionnelle.
+
+---
+
+## Amelioration #5 - Regionalisation des ARNs IAM (08/04/2026)
+
+| | |
+|---|---|
+| **Probleme** | Les ARNs dans les politiques IAM etaient construits avec une region codee en dur ou absente, rendant les modules non portables entre regions. |
+| **Fichiers modifies** | `modules/cleanup-lambda/variables.tf`, `modules/cleanup-lambda/main.tf`, `modules/metrics-lambda/variables.tf`, `environments/dev/cleanup-lambda.tf`, `environments/dev/metrics-lambda.tf` |
+
+### Ce qui a ete fait
+
+Ajout d'une variable `aws_region` dans les deux modules Lambda :
+
+```hcl
+variable "aws_region" {
+  description = "Région AWS de déploiement"
+  type        = string
+  default     = "eu-west-1"
+}
+```
+
+Les ARNs dans la politique IAM du module `cleanup-lambda` utilisent maintenant `var.aws_region` :
+
+```hcl
+Resource = [
+  "arn:aws:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/*",
+  "arn:aws:rds:${var.aws_region}:${data.aws_caller_identity.current.account_id}:db:*",
+  "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:*",
+  "arn:aws:sns:${var.aws_region}:${data.aws_caller_identity.current.account_id}:..."
+]
+```
+
+La valeur est passee explicitement dans les environnements :
+
+```hcl
+# cleanup-lambda.tf et metrics-lambda.tf
+aws_region = "eu-west-1"
+```
+
+### Regle a retenir
+> Ne jamais coder une region en dur dans un ARN IAM.
+> Utiliser `var.aws_region` + `data.aws_caller_identity.current.account_id` pour construire des ARNs
+> portables. Pour changer de region (ex: `us-east-1`), il suffit de modifier la valeur dans
+> le fichier d'environnement, sans toucher aux modules.
+
+---
+
 > *"En science comme en cloud, on documente ses erreurs pour ne pas les reproduire."*
