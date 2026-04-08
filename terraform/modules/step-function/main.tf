@@ -13,17 +13,19 @@ resource "aws_iam_role" "sfn_role" {
       Action    = "sts:AssumeRole"
     }]
   })
-  inline_policy {
-    name = "lambda-invoke"
-    policy = jsonencode({
-      Version = "2012-10-17"
-      Statement = [{
-        Effect   = "Allow"
-        Action   = "lambda:InvokeFunction"
-        Resource = [var.notify_lambda_arn, var.check_lambda_arn, var.quarantine_lambda_arn]
-      }]
-    })
-  }
+}
+
+resource "aws_iam_role_policy" "sfn_lambda_invoke" {
+  name = "lambda-invoke"
+  role = aws_iam_role.sfn_role.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "lambda:InvokeFunction"
+      Resource = [var.notify_lambda_arn, var.check_lambda_arn, var.quarantine_lambda_arn]
+    }]
+  })
 }
 
 resource "aws_sfn_state_machine" "tagging_governance" {
