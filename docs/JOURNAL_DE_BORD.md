@@ -1,7 +1,7 @@
 # Journal de Bord - AWS Tagging Governance
 
 > Carnet de laboratoire AWS - Erreurs rencontrées, solutions appliquées et lecons retenues.
-> Date : 12 Fevrier 2026 | Region : eu-west-1 (Ireland) | Compte : 440501616995
+> Date : 12 Fevrier 2026 | Region : eu-west-1 (Ireland) | Compte : 123456789012
 
 ---
 
@@ -63,14 +63,14 @@ resource_name = "data-lake"      # "dev-data-lake" deja pris mondialement
 
 ### Apres (OK)
 ```hcl
-resource_name = "data-lake-440501616995"  # Ajout de l'Account ID = unique
+resource_name = "data-lake-123456789012"  # Ajout de l'Account ID = unique
 ```
 
 ### Regle a retenir
 > Les buckets S3 ont un namespace **GLOBAL**. Deux comptes AWS ne peuvent pas avoir le meme nom de bucket.
 >
 > Strategies pour noms uniques :
-> - Ajouter l'Account ID : `mon-bucket-440501616995`
+> - Ajouter l'Account ID : `mon-bucket-123456789012`
 > - Ajouter un hash aleatoire : `mon-bucket-a3f8c2`
 > - Ajouter le nom de l'entreprise : `entreprise-mon-bucket-dev`
 >
@@ -387,9 +387,9 @@ Avant chaque `terraform apply`, verifier :
 
 | Ressource | Type | ID | Tags Owner |
 |-----------|------|----|------------|
-| dev-web-server | EC2 (t3.micro) | `i-025c9c5dd28801645` | jean.dupont@entreprise.com |
-| dev-analytics-db | RDS PostgreSQL (db.t3.micro) | `db-JEONEFPMGW7VQTKH25AOGSRIDM` | marie.martin@entreprise.com |
-| dev-data-lake-440501616995 | S3 Bucket | `dev-data-lake-440501616995` | paul.durand@entreprise.com |
+| dev-web-server | EC2 (t3.micro) | `i-0123456789abcdef0` | jean.dupont@entreprise.com |
+| dev-analytics-db | RDS PostgreSQL (db.t3.micro) | `db-XXXXXXXXXXXXXXXXXXXXXXXXXXXX` | marie.martin@entreprise.com |
+| dev-data-lake-123456789012 | S3 Bucket | `dev-data-lake-123456789012` | paul.durand@entreprise.com |
 | dev-data-processor | Lambda (Python 3.11) | `dev-data-processor` | sophie.leblanc@entreprise.com |
 | dev-tag-cleanup | Lambda (Python 3.11) | `dev-tag-cleanup` | CloudGovernance |
 
@@ -397,8 +397,8 @@ Avant chaque `terraform apply`, verifier :
 
 | Service | Endpoint |
 |---------|----------|
-| EC2 (IP publique) | `3.253.240.42` |
-| RDS PostgreSQL | `dev-analytics-db.cdeaei4ekk8i.eu-west-1.rds.amazonaws.com:5432` |
+| EC2 (IP publique) | `203.0.113.42` |
+| RDS PostgreSQL | `dev-analytics-db.xxxxxxxxxxxx.eu-west-1.rds.amazonaws.com:5432` |
 | Cleanup Lambda | Cron tous les jours a 2h UTC (`cron(0 2 * * ? *)`) |
 | Mode cleanup | `DRY_RUN` (simulation, aucune suppression reelle) |
 
