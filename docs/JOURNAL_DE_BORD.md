@@ -18,6 +18,8 @@
 9. [Tests unitaires - Lambda cleanup (14/02/2026)](#tests-unitaires---lambda-cleanup-14022026)
 10. [Checklist de deploiement](#checklist-de-deploiement)
 11. [Ressources deployees](#ressources-deployees)
+12. [Refonte Architecture - Pipeline de gouvernance avec Step Functions (Today 12:04)](#refonte-architecture---pipeline-de-gouvernance-avec-step-functions-today-1204)
+13. [TODO - Prochaine étape : Tests en prod](#todo---prochaine-étape--tests-en-prod)
 
 ---
 
@@ -534,6 +536,246 @@ aws_region = "eu-west-1"
 > Utiliser `var.aws_region` + `data.aws_caller_identity.current.account_id` pour construire des ARNs
 > portables. Pour changer de region (ex: `us-east-1`), il suffit de modifier la valeur dans
 > le fichier d'environnement, sans toucher aux modules.
+
+---
+
+---
+
+## Refonte Architecture - Pipeline de gouvernance avec Step Functions (Today 12:04)
+
+| | |
+|---|---|
+| **Date** | Aujourd'hui à 12h04 |
+| **Type** | Refonte majeure + nouvelle implémentation |
+| **Branches** | `main` |
+
+### Contexte et déclencheur
+
+Retour de mentor : **on ne supprime jamais automatiquement des ressources en entreprise.**
+L'ancienne Lambda cleanup supprimait après 24h de grace period — trop risqué en prod.
+Un dev qui crée une RDS en urgence un vendredi soir sans tags = base supprimée à 2h du matin.
+
+### Décisions d'architecture prises
+
+| Ressource | Ancienne approche | Nouvelle approche |
+|-----------|-------------------|-------------------|
+| EC2 | Terminate après 24h | Stop J+0 → Terminate J+4 après 2 notifications |
+| RDS | Delete (SkipFinalSnapshot=True) | Snapshot + Stop J+0 → Delete avec snapshot final J+4 |
+| S3 | Delete bucket + objets | Bloquer accès public + activer versioning — jamais supprimé auto |
+| Lambda | Delete après 24h | Concurrency=0 (freeze) J+0 → Delete J+4 |
+| Sans tag Owner | Suppression silencieuse | Pause immédiate + notification admin, décision humaine |
+
+### Nouvelle architecture : 3 Lambdas + 1 Step Function
+
+```
+EventBridge (cron 2h)
+        ↓
+  Lambda scanner        → détecte non-conformes, lance 1 Step Function par ressource
+        ↓
+  Step Functions
+        ↓
+  Lambda controller     → evaluate | check_compliance | notify (J0 / J2 / FAILURE)
+  Lambda executor       → freeze | resume | delete par type de ressource
+```
+
+**Flow de la state machine :**
+```
+EvaluateResource → FreezeResource → NotifyJ0 → Wait 48h
+  → CheckCompliance J+2
+      → conforme  : ResumeResource → Done
+      → non conforme : NotifyJ2 → Wait 48h
+          → CheckCompliance J+4
+              → conforme  : ResumeResource → Done
+              → non conforme : DeleteResource → Done
+  → erreur n'importe où : NotifyFailure → Failed
+```
+
+### Lambda Powertools ajouté sur les 3 Lambdas
+
+Raison : débugger une Step Functions sans logs structurés c'est impossible.
+
+- `Logger` → chaque log contient `resource_id`, `action`, `dry_run`, `step`
+- `Tracer` → X-Ray trace chaque appel AWS API, on voit quelle étape a pris du temps ou échoué
+- `Metrics` → métriques CloudWatch auto : `FreezeEC2`, `DeleteRDS`, `TagsCorrectedByOwner`, etc.
+
+### Fichiers créés
+
+```
+lambda/scanner/handler.py       → détection + lancement Step Function
+lambda/controller/handler.py    → logique de décision + notifications
+lambda/executor/handler.py      → actions freeze/resume/delete
+terraform/modules/step-function/state_machine.asl.json
+```
+
+### Best practice notée - Correction de tags en cours de pipeline
+
+> Si un owner corrige ses tags **pendant** le pipeline (entre J+0 et J+2, ou entre J+2 et J+4),
+> le `CheckCompliance` détecte la conformité → `ResumeResource` remet la ressource en marche
+> automatiquement → `Done`.
+> La Step Function se termine proprement sans suppression.
+> C'est le comportement attendu : **récompenser la correction rapide**.
+
+### Règle à retenir
+> En entreprise, une automation qui supprime sans validation humaine est un risque opérationnel majeur.
+> Le bon pattern : **alerter → geler → laisser du temps → supprimer en dernier recours**.
+> Step Functions est l'outil idéal pour ce type de pipeline d'escalade avec délais et gestion d'erreurs.
+
+---
+
+## Amélioration #6 - Module partagé shared/ pour éviter la duplication de code (22/04/2026)
+
+| | |
+|---|---|
+| **Outil utilisé** | Amazon Q |
+| **Fichiers créés** | `lambda/shared/__init__.py`, `lambda/shared/config.py` |
+| **Fichiers modifiés** | `lambda/scanner/handler.py`, `lambda/controller/handler.py`, `terraform/modules/governance-pipeline/main.tf` |
+
+### Problème
+
+`REQUIRED_TAGS` et `check_tags()` étaient copiés-collés dans `scanner/handler.py` ET `controller/handler.py`. Pour ajouter un tag obligatoire, il fallait modifier 2 fichiers — risque d'oublier un fichier ou de faire une typo.
+
+### Ce qui a été fait
+
+**Création de `lambda/shared/config.py`** — source unique de vérité :
+```python
+REQUIRED_TAGS = ["Owner", "Squad", "CostCenter", "Environment"]
+
+def check_tags(tags: list) -> tuple[bool, list]: ...
+def get_tag_value(tags: list, key: str) -> str: ...
+```
+
+**`scanner/handler.py` et `controller/handler.py`** — avant/après :
+```python
+# AVANT — dupliqué dans chaque fichier
+REQUIRED_TAGS = ["Owner", "Squad", "CostCenter", "Environment"]
+def check_tags(...): ...
+
+# APRÈS — import unique
+from shared.config import REQUIRED_TAGS, check_tags, get_tag_value
+```
+
+**`terraform/modules/governance-pipeline/main.tf`** — ajout d'un Lambda Layer :
+```hcl
+# Les Lambdas sont déployées en .zip — shared/ doit être disponible au runtime
+resource "aws_lambda_layer_version" "shared" { ... }
+
+# Ajouté sur scanner et controller
+layers = [aws_lambda_layer_version.shared.arn]
+```
+
+### Résultat
+
+Avant : ajouter un tag obligatoire "Project" = modifier 2 fichiers, risque de désynchronisation.
+Après : modifier uniquement `lambda/shared/config.py` = appliqué partout automatiquement.
+
+### Règle à retenir
+> Quand la même constante ou fonction apparaît dans plusieurs Lambdas, la centraliser dans un module partagé.
+> Sur AWS, le mécanisme pour partager du code entre Lambdas est le **Lambda Layer**.
+> Sans le Layer, le `import shared.config` échoue au runtime même si le fichier existe localement.
+
+---
+
+## Bonne pratique #1 - Ne jamais stocker les access keys dans un fichier (22/04/2026)
+
+| | |
+|---|---|
+| **Contexte** | On allait coller les access keys AWS dans `sensible/.env` pour connecter Grafana à CloudWatch |
+| **Risque évité** | Un fichier `.env` peut être commité par erreur, partagé, ou lu par un outil tiers |
+
+### Ce qu'on a failli faire (dangereux)
+
+```bash
+# sensible/.env
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+```
+
+Même avec un `.gitignore` correct, stocker des clés dans un fichier texte est risqué.
+
+### Ce qu'on fait à la place (safe)
+
+```bash
+aws configure
+# Les credentials sont stockés dans ~/.aws/credentials
+# Jamais dans le projet, jamais dans Git
+```
+
+Puis dans `docker-compose.yml`, monter le dossier AWS credentials :
+```yaml
+volumes:
+  - ~/.aws:/root/.aws:ro
+```
+
+### Règle à retenir
+> Les access keys AWS ne doivent **jamais** être dans un fichier du projet.
+> Toujours passer par `aws configure` — les credentials restent dans `~/.aws/credentials`,
+> hors du repo, hors de tout outil tiers.
+> Si une clé fuite sur GitHub, AWS la détecte et la désactive automatiquement — mais le mal est fait.
+
+---
+
+## TODO - Prochaine étape : Tests en prod
+
+| | |
+|---|---|
+| **Statut** | 🔴 À faire |
+| **Priorité** | Haute — c'est la seule étape restante |
+
+### Ce qui est terminé ✅
+
+- Module `tagged-resources` — enforcement tags Terraform
+- Lambda `metrics` — CloudWatch + Cost Explorer
+- Grafana dashboard
+- CI/CD GitHub Actions (flake8 + terraform fmt/validate + infracost)
+- Tests unitaires (pytest + moto) — 12/12 PASSED
+- Sécurité hardening (S3 public block, SNS KMS, IAM least privilege)
+- State machine ASL — flow complet J0/J2/J4
+- Lambda `scanner` — détection + lancement Step Function par ressource
+- Lambda `controller` — evaluate/check/notify avec Powertools + Slack
+- Lambda `executor` — freeze/resume/delete avec Powertools
+- Module Terraform `governance-pipeline` — IAM least privilege, 3 Lambdas, Step Functions, EventBridge
+- Environnement `prod/` créé (`dry_run=true`)
+- README mis à jour avec diagrammes Mermaid
+- Historique git nettoyé (Account ID supprimé)
+
+### Ce qu'il reste à faire 🔴
+
+**1. Configurer le webhook Slack**
+- Aller sur [api.slack.com/apps](https://api.slack.com/apps)
+- Créer une app → Incoming Webhooks → copier l'URL
+- Stocker dans Secrets Manager via Terraform
+
+**2. Déployer en prod**
+```bash
+cd terraform/environments/prod
+cp terraform.tfvars.example terraform.tfvars
+# Remplir notification_email + slack_webhook_url
+terraform init
+terraform plan
+terraform apply
+```
+
+**3. Déclencher un test manuel**
+- Créer une ressource sans tags (ex: bucket S3)
+- Invoquer le scanner manuellement :
+```bash
+aws lambda invoke \
+  --function-name prod-governance-scanner \
+  --payload '{}' \
+  output.json && cat output.json
+```
+- Vérifier dans la console Step Functions que l'exécution démarre
+- Vérifier que Slack reçoit la notification J+0
+- Ajouter les tags manquants → vérifier que le pipeline détecte la correction et resume
+
+**4. Valider le DRY_RUN**
+- Confirmer qu'aucune ressource n'est supprimée pendant les tests
+- Une fois validé → passer `dry_run = false` en prod
+
+### Règle à retenir
+> Toujours tester en DRY_RUN avant de passer en mode réel.
+> Le pipeline est conçu pour ça : observer le comportement complet
+> sans risque, puis activer les actions réelles une fois confiant.
 
 ---
 
