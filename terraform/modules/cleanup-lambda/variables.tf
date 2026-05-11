@@ -45,3 +45,21 @@ variable "log_retention_days" {
   type        = number
   default     = 7
 }
+
+variable "dynamodb_table_arn" {
+  description = "ARN de la table DynamoDB redqueen-governance-state"
+  type        = string
+}
+
+variable "feedback_url" {
+  description = "URL publique de la Lambda feedback (pour les liens dans les emails SNS)"
+  type        = string
+  default     = ""
+}
+
+variable "feedback_secret" {
+  description = "Secret HMAC pour signer les tokens des liens de feedback"
+  type        = string
+  sensitive   = true
+  default     = ""
+}

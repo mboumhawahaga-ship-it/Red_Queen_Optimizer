@@ -23,6 +23,13 @@ module "cleanup_lambda" {
 
   # Rétention des logs : 7 jours
   log_retention_days = 7
+
+  # Table DynamoDB pour l'état de gouvernance
+  dynamodb_table_arn = module.governance_state.table_arn
+
+  # Liens de feedback dans les emails SNS
+  feedback_url    = module.feedback.feedback_url
+  feedback_secret = var.feedback_secret
 }
 
 # ========================================

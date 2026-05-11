@@ -1,12 +1,14 @@
 module "step_function" {
-  source                = "../../modules/step-function"
-  environment           = "dev"
-  dry_run               = true
-  max_budget            = 100
-  grace_period_hours    = 24
-  notify_lambda_arn     = module.cleanup_lambda.lambda_function_arn
-  check_lambda_arn      = module.metrics_lambda.lambda_function_arn
-  quarantine_lambda_arn = module.cleanup_lambda.lambda_function_arn
+  source = "../../modules/step-function"
+
+  environment        = "dev"
+  dry_run            = true
+  dynamodb_table_arn = module.governance_state.table_arn
+  sns_topic_arn      = module.cleanup_lambda.sns_topic_arn
+  feedback_url       = module.feedback.feedback_url
+  feedback_secret    = var.feedback_secret
+  slack_webhook_url  = var.slack_webhook_url
+  log_retention_days = 7
 }
 
 module "eventbridge" {

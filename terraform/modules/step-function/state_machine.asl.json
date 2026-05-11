@@ -1,0 +1,289 @@
+{
+  "Comment": "Red Queen — Tiered Alert System. FAST (NON_CRITICAL): notify → reminder@12h → wait 7d → remediate. SLOW (CRITICAL): notify → wait 36h → re-check → escalation → remediate. No resource is ever deleted — only stopped and quarantined.",
+  "StartAt": "RouteByTrack",
+  "States": {
+
+    "RouteByTrack": {
+      "Type": "Choice",
+      "Comment": "Branch on criticality. CRITICAL → SLOW 36h SLA. NON_CRITICAL → FAST 7-day SLA.",
+      "Choices": [
+        {
+          "Variable": "$.criticality",
+          "StringEquals": "CRITICAL",
+          "Next": "SLOW_NotifyOwner"
+        }
+      ],
+      "Default": "FAST_NotifyOwner"
+    },
+
+    "FAST_NotifyOwner": {
+      "Type": "Task",
+      "Comment": "Alert #1 — NON_CRITICAL. Send email+Slack with feedback links. waitForTaskToken: owner has 7 days to act.",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "${NotifyLambdaArn}",
+        "Payload": {
+          "track": "FAST",
+          "reminder_number": 1,
+          "sla_hours": 168,
+          "resource_id.$": "$.resource_id",
+          "resource_type.$": "$.resource_type",
+          "missing_tags.$": "$.missing_tags",
+          "criticality.$": "$.criticality",
+          "task_token.$": "$$.Task.Token"
+        }
+      },
+      "ResultPath": "$.notify_result",
+      "HeartbeatSeconds": 43200,
+      "TimeoutSeconds": 604800,
+      "Catch": [
+        {
+          "ErrorEquals": ["States.HeartbeatTimeout"],
+          "Next": "FAST_Reminder",
+          "ResultPath": "$.error"
+        },
+        {
+          "ErrorEquals": ["States.Timeout"],
+          "Next": "FAST_RemediateResource",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "FAST_RouteByFeedback"
+    },
+
+    "FAST_Reminder": {
+      "Type": "Task",
+      "Comment": "Reminder #2 at 12h — re-send notification, reset 12h heartbeat window.",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "${NotifyLambdaArn}",
+        "Payload": {
+          "track": "FAST",
+          "reminder_number": 2,
+          "sla_hours": 156,
+          "resource_id.$": "$.resource_id",
+          "resource_type.$": "$.resource_type",
+          "missing_tags.$": "$.missing_tags",
+          "criticality.$": "$.criticality",
+          "task_token.$": "$$.Task.Token"
+        }
+      },
+      "ResultPath": "$.notify_result",
+      "HeartbeatSeconds": 43200,
+      "TimeoutSeconds": 561600,
+      "Catch": [
+        {
+          "ErrorEquals": ["States.HeartbeatTimeout", "States.Timeout"],
+          "Next": "FAST_RemediateResource",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "FAST_RouteByFeedback"
+    },
+
+    "FAST_RouteByFeedback": {
+      "Type": "Choice",
+      "Comment": "approve or tag → Handled. reject → Remediate immediately.",
+      "Choices": [
+        {
+          "Variable": "$.notify_result.feedback_action",
+          "StringEquals": "approve",
+          "Next": "FAST_Handled"
+        },
+        {
+          "Variable": "$.notify_result.feedback_action",
+          "StringEquals": "tag",
+          "Next": "FAST_Handled"
+        }
+      ],
+      "Default": "FAST_RemediateResource"
+    },
+
+    "FAST_Handled": {
+      "Type": "Succeed",
+      "Comment": "Owner marked resource as handled — no remediation needed."
+    },
+
+    "FAST_RemediateResource": {
+      "Type": "Task",
+      "Comment": "7-day SLA expired or owner rejected — stop + quarantine (never delete).",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${RemediateLambdaArn}",
+        "Payload": {
+          "resource_id.$": "$.resource_id",
+          "resource_type.$": "$.resource_type",
+          "reason": "sla_expired_non_critical",
+          "dry_run.$": "$.dry_run"
+        }
+      },
+      "ResultPath": "$.remediate_result",
+      "End": true
+    },
+
+    "SLOW_NotifyOwner": {
+      "Type": "Task",
+      "Comment": "Alert #1 — CRITICAL. 36h SLA. Fire-and-forget SNS+Slack, no taskToken yet.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${NotifyLambdaArn}",
+        "Payload": {
+          "track": "SLOW",
+          "reminder_number": 1,
+          "sla_hours": 36,
+          "resource_id.$": "$.resource_id",
+          "resource_type.$": "$.resource_type",
+          "missing_tags.$": "$.missing_tags",
+          "criticality.$": "$.criticality"
+        }
+      },
+      "ResultPath": "$.notify_result",
+      "Next": "SLOW_WaitGracePeriod"
+    },
+
+    "SLOW_WaitGracePeriod": {
+      "Type": "Wait",
+      "Comment": "36h grace period for CRITICAL resources.",
+      "Seconds": 129600,
+      "Next": "SLOW_CheckCompliance"
+    },
+
+    "SLOW_CheckCompliance": {
+      "Type": "Task",
+      "Comment": "Re-read DynamoDB — was the resource tagged during the 36h window?",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${CheckLambdaArn}",
+        "Payload": {
+          "resource_id.$": "$.resource_id",
+          "resource_type.$": "$.resource_type"
+        }
+      },
+      "ResultPath": "$.check_result",
+      "Next": "SLOW_RouteByCompliance"
+    },
+
+    "SLOW_RouteByCompliance": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.check_result.Payload.compliant",
+          "BooleanEquals": true,
+          "Next": "SLOW_NowCompliant"
+        }
+      ],
+      "Default": "SLOW_Escalation"
+    },
+
+    "SLOW_NowCompliant": {
+      "Type": "Succeed",
+      "Comment": "Resource was tagged within 36h — compliant, no action needed."
+    },
+
+    "SLOW_Escalation": {
+      "Type": "Task",
+      "Comment": "Alert #2 — Still non-compliant after 36h. Escalation email+Slack with taskToken. Owner has 7 days.",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "${NotifyLambdaArn}",
+        "Payload": {
+          "track": "SLOW_ESCALATION",
+          "reminder_number": 2,
+          "sla_hours": 168,
+          "resource_id.$": "$.resource_id",
+          "resource_type.$": "$.resource_type",
+          "missing_tags.$": "$.missing_tags",
+          "criticality.$": "$.criticality",
+          "task_token.$": "$$.Task.Token"
+        }
+      },
+      "ResultPath": "$.escalation_result",
+      "HeartbeatSeconds": 86400,
+      "TimeoutSeconds": 604800,
+      "Catch": [
+        {
+          "ErrorEquals": ["States.HeartbeatTimeout"],
+          "Next": "SLOW_FinalReminder",
+          "ResultPath": "$.error"
+        },
+        {
+          "ErrorEquals": ["States.Timeout"],
+          "Next": "SLOW_RemediateResource",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "SLOW_RouteByEscalation"
+    },
+
+    "SLOW_FinalReminder": {
+      "Type": "Task",
+      "Comment": "Alert #3 — Final reminder after 24h of silence. Last chance before quarantine.",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "${NotifyLambdaArn}",
+        "Payload": {
+          "track": "SLOW_FINAL_REMINDER",
+          "reminder_number": 3,
+          "sla_hours": 144,
+          "resource_id.$": "$.resource_id",
+          "resource_type.$": "$.resource_type",
+          "missing_tags.$": "$.missing_tags",
+          "criticality.$": "$.criticality",
+          "task_token.$": "$$.Task.Token"
+        }
+      },
+      "ResultPath": "$.escalation_result",
+      "HeartbeatSeconds": 86400,
+      "TimeoutSeconds": 518400,
+      "Catch": [
+        {
+          "ErrorEquals": ["States.HeartbeatTimeout", "States.Timeout"],
+          "Next": "SLOW_RemediateResource",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "SLOW_RouteByEscalation"
+    },
+
+    "SLOW_RouteByEscalation": {
+      "Type": "Choice",
+      "Comment": "approve or tag → Handled. reject → Remediate.",
+      "Choices": [
+        {
+          "Variable": "$.escalation_result.feedback_action",
+          "StringEquals": "approve",
+          "Next": "SLOW_Handled"
+        },
+        {
+          "Variable": "$.escalation_result.feedback_action",
+          "StringEquals": "tag",
+          "Next": "SLOW_Handled"
+        }
+      ],
+      "Default": "SLOW_RemediateResource"
+    },
+
+    "SLOW_Handled": {
+      "Type": "Succeed",
+      "Comment": "Owner marked CRITICAL resource as handled."
+    },
+
+    "SLOW_RemediateResource": {
+      "Type": "Task",
+      "Comment": "All SLAs exhausted — stop + quarantine the CRITICAL resource. Never delete.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${RemediateLambdaArn}",
+        "Payload": {
+          "resource_id.$": "$.resource_id",
+          "resource_type.$": "$.resource_type",
+          "reason": "sla_expired_critical",
+          "dry_run.$": "$.dry_run"
+        }
+      },
+      "ResultPath": "$.remediate_result",
+      "End": true
+    }
+
+  }
+}

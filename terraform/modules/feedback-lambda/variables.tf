@@ -1,10 +1,20 @@
 variable "environment" {
   description = "Environnement (dev, staging, prod)"
   type        = string
+  validation {
+    condition     = contains(["dev", "staging", "prod"], var.environment)
+    error_message = "environment doit être dev, staging ou prod"
+  }
+}
+
+variable "aws_region" {
+  description = "Région AWS de déploiement"
+  type        = string
+  default     = "eu-west-1"
 }
 
 variable "dry_run" {
-  description = "Mode dry-run : aucune suppression réelle si true"
+  description = "true = simulation, false = tags appliqués réellement"
   type        = bool
   default     = true
 }
@@ -14,29 +24,10 @@ variable "dynamodb_table_arn" {
   type        = string
 }
 
-variable "sns_topic_arn" {
-  description = "ARN du topic SNS pour les notifications email"
-  type        = string
-}
-
-variable "feedback_url" {
-  description = "URL publique de la Lambda feedback (pour les liens dans les emails)"
-  type        = string
-  default     = ""
-}
-
 variable "feedback_secret" {
   description = "Secret HMAC pour signer les tokens des liens de feedback"
   type        = string
   sensitive   = true
-  default     = ""
-}
-
-variable "slack_webhook_url" {
-  description = "URL du webhook Slack pour les alertes (optionnel)"
-  type        = string
-  sensitive   = true
-  default     = ""
 }
 
 variable "log_retention_days" {

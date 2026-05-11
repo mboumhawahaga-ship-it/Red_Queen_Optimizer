@@ -10,3 +10,11 @@ aws_region = "eu-west-1" # Paris
 default_owner       = "VotreNom"
 default_squad       = "VotreEquipe"
 default_cost_center = "CC-XXX"
+
+# Secret HMAC pour signer les liens de feedback
+# Générez avec : openssl rand -hex 32
+feedback_secret = "CHANGEZ-MOI-openssl-rand-hex-32"
+
+# Webhook Slack pour les alertes (optionnel)
+# Créez un Incoming Webhook sur https://api.slack.com/apps
+slack_webhook_url = ""

@@ -107,6 +107,16 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:*",
           "arn:aws:sns:${var.aws_region}:${data.aws_caller_identity.current.account_id}:${local.lambda_name}-notifications"
         ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:GetItem",
+          "dynamodb:Query"
+        ]
+        Resource = var.dynamodb_table_arn
       }
     ]
   })
@@ -136,9 +146,12 @@ resource "aws_lambda_function" "cleanup" {
 
   environment {
     variables = {
-      GRACE_PERIOD_HOURS = var.grace_period_hours
-      DRY_RUN            = var.dry_run ? "true" : "false"
-      SNS_TOPIC_ARN      = aws_sns_topic.cleanup_notifications.arn
+      GRACE_PERIOD_HOURS  = var.grace_period_hours
+      DRY_RUN             = var.dry_run ? "true" : "false"
+      SNS_TOPIC_ARN       = aws_sns_topic.cleanup_notifications.arn
+      DYNAMODB_TABLE_NAME = split(":", var.dynamodb_table_arn)[6]
+      FEEDBACK_URL        = var.feedback_url
+      FEEDBACK_SECRET     = var.feedback_secret
     }
   }
 

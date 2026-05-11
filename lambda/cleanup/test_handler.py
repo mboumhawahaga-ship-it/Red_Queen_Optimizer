@@ -79,6 +79,9 @@ def aws_env():
         "GRACE_PERIOD_HOURS": "0",
         "DRY_RUN": "false",
         "SNS_TOPIC_ARN": "",
+        "DYNAMODB_TABLE_NAME": "",  # désactivé en tests unitaires
+        "FEEDBACK_URL": "",
+        "FEEDBACK_SECRET": "",
     }
     with patch.dict(os.environ, env_vars):
         yield
@@ -88,7 +91,7 @@ def aws_env():
 
 
 # ========================================
-# TESTS LOGIQUE PURE (check_required_tags)
+# TESTS LOGIQUE PURE (check_required_tags + classify_resource)
 # ========================================
 
 def test_check_required_tags_conforme():
@@ -123,31 +126,62 @@ def test_check_required_tags_none():
     assert is_ok is False
 
 
+def test_classify_rds_toujours_critical():
+    """RDS doit toujours etre CRITICAL, meme sans tags."""
+    handler = load_handler()
+    assert handler.classify_resource('rds', []) == 'CRITICAL'
+    assert handler.classify_resource('rds', COMPLIANT_TAGS) == 'CRITICAL'
+
+
+def test_classify_ec2_prod_est_critical():
+    """EC2 avec Environment=prod doit etre CRITICAL."""
+    handler = load_handler()
+    prod_tags = [{"Key": "Environment", "Value": "prod"}]
+    assert handler.classify_resource('ec2', prod_tags) == 'CRITICAL'
+
+
+def test_classify_ec2_dev_est_non_critical():
+    """EC2 avec Environment=dev doit etre NON_CRITICAL."""
+    handler = load_handler()
+    assert handler.classify_resource('ec2', COMPLIANT_TAGS) == 'NON_CRITICAL'
+
+
+def test_classify_critical_workload_tag():
+    """Le tag CriticalWorkload=true doit forcer CRITICAL sur n'importe quel type."""
+    handler = load_handler()
+    tags = [{"Key": "CriticalWorkload", "Value": "true"}]
+    assert handler.classify_resource('s3', tags) == 'CRITICAL'
+    assert handler.classify_resource('lambda', tags) == 'CRITICAL'
+
+
+def test_classify_s3_lambda_non_critical_par_defaut():
+    """S3 et Lambda sans tag special doivent etre NON_CRITICAL."""
+    handler = load_handler()
+    assert handler.classify_resource('s3', COMPLIANT_TAGS) == 'NON_CRITICAL'
+    assert handler.classify_resource('lambda', COMPLIANT_TAGS) == 'NON_CRITICAL'
+
+
 # ========================================
 # TESTS EC2
 # ========================================
 
 @mock_aws
 def test_ec2_sans_tags_est_supprimee():
-    """Une instance EC2 sans tags obligatoires doit etre terminee."""
+    """Une instance EC2 sans tags (NON_CRITICAL) doit etre terminee."""
     ec2 = boto3.client("ec2", region_name=REGION)
 
-    # Creer une instance SANS tags
     resp = ec2.run_instances(ImageId="ami-12345678", MinCount=1, MaxCount=1)
     instance_id = resp["Instances"][0]["InstanceId"]
 
-    # Verifier qu'elle tourne
     state = ec2.describe_instances(InstanceIds=[instance_id])
     assert state["Reservations"][0]["Instances"][0]["State"]["Name"] == "running"
 
-    # Lancer le cleanup
     handler = load_handler()
     result = handler.lambda_handler({}, None)
     body = json.loads(result["body"])
 
-    # Detectee comme non conforme
-    assert body.get("ec2_non_compliant", 0) >= 1
-    # Supprimee
+    # Structure correcte : body["ec2"]["non_compliant"]
+    assert body["ec2"]["non_compliant"] >= 1
     state = ec2.describe_instances(InstanceIds=[instance_id])
     instance_state = state["Reservations"][0]["Instances"][0]["State"]["Name"]
     assert instance_state in ["shutting-down", "terminated"]
@@ -168,9 +202,10 @@ def test_ec2_avec_tags_corrects_est_preservee():
     instance_id = resp["Instances"][0]["InstanceId"]
 
     handler = load_handler()
-    handler.lambda_handler({}, None)
+    result = handler.lambda_handler({}, None)
+    body = json.loads(result["body"])
 
-    # L'instance doit toujours tourner
+    assert body["ec2"]["non_compliant"] == 0
     state = ec2.describe_instances(InstanceIds=[instance_id])
     assert state["Reservations"][0]["Instances"][0]["State"]["Name"] == "running"
 
@@ -188,10 +223,8 @@ def test_ec2_dry_run_ne_supprime_pas():
         result = handler.lambda_handler({}, None)
         body = json.loads(result["body"])
 
-    # Detectee mais PAS supprimee
-    assert body.get("ec2_non_compliant", 0) >= 1
-    assert body.get("ec2_deleted", 0) == 0
-
+    assert body["ec2"]["non_compliant"] >= 1
+    assert body["ec2"]["deleted"] == 0
     state = ec2.describe_instances(InstanceIds=[instance_id])
     assert state["Reservations"][0]["Instances"][0]["State"]["Name"] == "running"
 
@@ -214,7 +247,7 @@ def test_s3_sans_tags_est_detecte():
     result = handler.lambda_handler({}, None)
     body = json.loads(result["body"])
 
-    assert body.get("s3_non_compliant", 0) >= 1
+    assert body["s3"]["non_compliant"] >= 1
 
 
 @mock_aws
@@ -235,9 +268,7 @@ def test_s3_avec_tags_est_preserve():
     result = handler.lambda_handler({}, None)
     body = json.loads(result["body"])
 
-    assert body.get("s3_deleted", 0) == 0
-
-    # Le bucket existe toujours
+    assert body["s3"]["deleted"] == 0
     buckets = [b["Name"] for b in s3.list_buckets()["Buckets"]]
     assert "bucket-avec-tags" in buckets
 
@@ -258,7 +289,7 @@ def test_s3_avec_objets_est_vide_avant_suppression():
     result = handler.lambda_handler({}, None)
     body = json.loads(result["body"])
 
-    assert body.get("s3_non_compliant", 0) >= 1
+    assert body["s3"]["non_compliant"] >= 1
 
 
 # ========================================
@@ -292,7 +323,7 @@ def test_lambda_sans_tags_est_detectee():
     result = handler.lambda_handler({}, None)
     body = json.loads(result["body"])
 
-    assert body.get("lambda_non_compliant", 0) >= 1
+    assert body["lambda"]["non_compliant"] >= 1
 
 
 # ========================================
@@ -324,12 +355,9 @@ def test_mix_conformes_et_non_conformes():
     result = handler.lambda_handler({}, None)
     body = json.loads(result["body"])
 
-    # Au moins 1 EC2 et 1 S3 non conformes
-    assert body.get("ec2_non_compliant", 0) >= 1
-    assert body.get("s3_non_compliant", 0) >= 1
-
-    # Les 2 types ont ete scannes
-    assert body.get("ec2_scanned", 0) >= 2
-    assert body.get("s3_scanned", 0) >= 2
+    assert body["ec2"]["non_compliant"] >= 1
+    assert body["s3"]["non_compliant"] >= 1
+    assert body["ec2"]["scanned"] >= 2
+    assert body["s3"]["scanned"] >= 2
 
     print(f"\nResultat complet : {json.dumps(body, indent=2)}")
