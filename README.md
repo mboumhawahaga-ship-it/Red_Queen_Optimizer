@@ -1,148 +1,172 @@
-# AWS Tagging Governance
+# Red Queen Optimizer
 
-[![Quality & Security Check](https://github.com/mboumhawahaga-ship-it/Aws-tagging-gouvernance/actions/workflows/ci-quality.yml/badge.svg)](https://github.com/mboumhawahaga-ship-it/Aws-tagging-gouvernance/actions/workflows/ci-quality.yml)
+[![Quality & Security Check](https://github.com/mboumhawahaga-ship-it/Red_Queen_Optimizer/actions/workflows/ci-quality.yml/badge.svg)](https://github.com/mboumhawahaga-ship-it/Red_Queen_Optimizer/actions/workflows/ci-quality.yml)
 
-**Systeme complet de gouvernance de tagging pour AWS**
+**Système de gouvernance de tagging AWS — alertes, auto-tagging et remédiation progressive.**
 
-Forcez le respect des politiques de tagging sur toutes vos ressources AWS pour :
-- Maitriser les couts par equipe
-- Ameliorer la tracabilite
-- Automatiser la gestion du cycle de vie
-- Visualiser les depenses
+> "On ne supprime jamais automatiquement en production."
+> Red Queen avertit, tente de corriger, escalade — et ne supprime qu'en tout dernier recours avec approbation humaine.
+
+---
+
+## Vue d'ensemble
+
+```
+EventBridge (cron 2h du matin)
+        │
+        ▼
+  Lambda Cleanup          ← scanne EC2, RDS, S3, Lambda
+        │
+        ├── Tag CRITIQUE manquant        ├── Tag NON-CRITIQUE manquant
+        │   (Owner, CostCenter, Env)     │   (Project, Team)
+        │                                │
+        ▼                                ▼
+  FAST TRACK — 36h SLA           SLOW TRACK — 7 jours
+  ┌──────────────────────┐       ┌──────────────────────┐
+  │ 1. Auto-tag          │       │ 1. Email warning     │
+  │ 2. Email + freeze    │       │ 2. Attente 3 jours   │
+  │ 3. Attente 18h       │       │ 3. Auto-tag          │
+  │ 4. Rappel manager    │       │ 4. Attente 4 jours   │
+  │ 5. Approbation avant │       │ 5. Freeze + escalade │
+  │    suppression       │       └──────────────────────┘
+  └──────────────────────┘
+        │
+        ▼
+  Lambda Feedback         ← bouton "j'ai géré" dans les emails
+  DynamoDB                ← registre complet des événements
+  Lambda Metrics          ← stats CloudWatch toutes les 6h
+```
+
+---
+
+## Ce qui rend ce projet "real-world"
+
+| Fonctionnalité | Description |
+|----------------|-------------|
+| **Tiered Alert System** | SLA 36h pour tags critiques, 7 jours pour non-critiques |
+| **Auto-Tagging** | Interroge CloudTrail pour inférer Owner, Environment, CostCenter |
+| **Feedback Mechanism** | Lien "j'ai géré" dans les emails — bloque la suppression |
+| **Human approval** | Aucune suppression sans `waitForTaskToken` validé par un humain |
+| **DRY_RUN=true** | Mode simulation activé par défaut — zéro risque au démarrage |
+| **Audit trail** | Chaque action enregistrée en DynamoDB avec timestamp et auteur |
+
+---
+
+## Tags obligatoires
+
+| Tag | Niveau | Description | Exemple |
+|-----|--------|-------------|---------|
+| `Owner` | 🔴 Critique | Email du responsable | `jean.dupont@entreprise.com` |
+| `CostCenter` | 🔴 Critique | Centre de coûts | `CC-123` |
+| `Environment` | 🔴 Critique | Environnement | `dev`, `staging`, `prod` |
+| `Squad` | 🟡 Non-critique | Équipe responsable | `Data`, `DevOps` |
+| `Project` | 🟡 Non-critique | Projet associé | `Analytics` |
+
+---
+
+## Stack technique
+
+| Composant | Service AWS |
+|-----------|-------------|
+| Orchestration | AWS Step Functions (Standard) |
+| Scan | Lambda Python 3.12 + Lambda Powertools |
+| Auto-tagging | Lambda + CloudTrail Lookup |
+| Feedback | Lambda URL (sans API Gateway) |
+| État | DynamoDB (PAY_PER_REQUEST + TTL) |
+| Notifications | SNS Email + Slack (optionnel) |
+| Secrets | SSM Parameter Store (SecureString) |
+| Déclencheur | EventBridge cron |
+| IaC | Terraform modulaire |
+| CI/CD | GitHub Actions (flake8 + terraform validate) |
 
 ---
 
 ## Structure du projet
 
 ```
-aws-tagging-governance/
-├── .github/workflows/
-│   └── ci-quality.yml              # CI/CD : Flake8 + Terraform fmt/validate
+Red_Queen_Optimizer/
+├── lambda/
+│   ├── cleanup/          # Scan des ressources non conformes
+│   ├── auto_tagger/      # Inférence et application automatique des tags
+│   ├── feedback/         # Endpoint "j'ai géré" (Lambda URL)
+│   ├── step_function/    # Handlers Step Functions (check, notify, remediate)
+│   └── metrics/          # Collecte CloudWatch toutes les 6h
 ├── terraform/
 │   ├── modules/
-│   │   ├── tagged-resources/       # Module de tagging reutilisable
-│   │   ├── cleanup-lambda/         # Module Lambda de nettoyage
-│   │   └── metrics-lambda/         # Module Lambda de metriques
-│   ├── environments/
-│   │   └── dev/                    # Environnement de dev
-│   └── policies/                   # AWS Config rules (a venir)
-├── lambda/
-│   ├── cleanup/                    # Auto-cleanup des ressources non conformes
-│   └── metrics/                    # Collecte de metriques CloudWatch
-├── grafana/
-│   ├── dashboards/                 # Dashboard de visualisation des couts
-│   └── provisioning/               # Configuration automatique datasources
-├── sensible/                       # Secrets centralises (gitignored)
-│   ├── .env                        # Variables d'environnement (NON commite)
-│   └── .env.example                # Template a copier
-├── scripts/                        # Scripts d'automatisation
-├── docs/                           # Documentation detaillee
-│   ├── GUIDE_DEMARRAGE.md          # Guide pas-a-pas pour debutants
-│   ├── SECURITY.md                 # Bonnes pratiques securite
-│   └── JOURNAL_DE_BORD.md          # Journal de diagnostic et solutions
-└── docker-compose.yml              # Grafana local + CloudWatch
+│   │   ├── cleanup-lambda/
+│   │   ├── auto-tagger-lambda/
+│   │   ├── feedback-lambda/
+│   │   ├── step-function/
+│   │   ├── dynamodb/
+│   │   ├── eventbridge/
+│   │   ├── metrics-lambda/
+│   │   └── tagged-resources/
+│   └── environments/
+│       └── dev/
+├── docs/
+│   ├── JOURNAL_DE_BORD.md   # Historique des décisions techniques
+│   ├── PLAN_V2.md           # Plan de restructuration v2
+│   └── SECURITY.md
+└── docker-compose.yml        # Grafana local (optionnel)
 ```
 
 ---
 
-## Tags obligatoires
-
-Toutes les ressources AWS **doivent** avoir ces tags :
-
-| Tag | Type | Description | Exemple |
-|-----|------|-------------|---------|
-| `Owner` | string | Email du proprietaire | `jean.dupont@entreprise.com` |
-| `Squad` | string | Equipe responsable | `Data`, `Backend`, `DevOps` |
-| `CostCenter` | string | Centre de couts | `CC-123` |
-| `AutoShutdown` | bool | Arret automatique hors heures | `true` / `false` |
-| `Environment` | string | Environnement | `dev`, `staging`, `prod` |
-
-**Tags automatiques ajoutes** :
-- `ManagedBy` : `Terraform`
-- `CreatedAt` : Timestamp de creation (stable via `time_static`)
-
----
-
-## Demarrage rapide
+## Démarrage rapide
 
 ```bash
 # 1. Cloner le projet
-git clone git clone https://github.com/mboumhawahaga-ship-it/Aws-tagging-gouvernance.git
+git clone https://github.com/mboumhawahaga-ship-it/Red_Queen_Optimizer.git
+cd Red_Queen_Optimizer
 
-# 2. Configurer les secrets
-cp sensible/.env.example sensible/.env
-# Editez sensible/.env avec vos credentials AWS
+# 2. Configurer les credentials AWS
+aws configure
 
-# 3. Deployer l'infrastructure
+# 3. Configurer les variables
 cd terraform/environments/dev
-terraform init
-terraform plan     # Voir ce qui va etre cree
-terraform apply    # Creer les ressources
+cp terraform.tfvars.example terraform.tfvars
+# Remplir : feedback_secret (openssl rand -hex 32)
 
-# 4. Lancer le dashboard Grafana (optionnel)
-cd ../../..
-docker-compose up -d
-# Ouvrir http://localhost:3000
+# 4. Déployer
+terraform init
+terraform plan
+terraform apply
+
+# 5. Tester (mode simulation — aucune ressource supprimée)
+aws lambda invoke \
+  --function-name dev-tag-cleanup \
+  --payload '{}' \
+  output.json && cat output.json
 ```
 
 ---
 
-## Fonctionnalites
+## Comportement par type de ressource
 
-### Module Terraform de tagging
-- Tags obligatoires avec validation stricte (regex email, valeurs autorisees)
-- Support EC2, RDS, S3, Lambda
-- Chiffrement automatique (RDS, S3)
-- Generation de mots de passe RDS via Secrets Manager
+| Ressource | Freeze J+0 | Remédiation | Suppression |
+|-----------|-----------|-------------|-------------|
+| EC2 | Stop instance | Restart si tags corrigés | Terminate (approbation requise) |
+| RDS | Snapshot + Stop | Restart si tags corrigés | Delete avec snapshot final |
+| S3 | Block public access | Retrait block si corrigé | Jamais supprimé automatiquement |
+| Lambda | Concurrency = 0 | Restore si tags corrigés | Delete (approbation requise) |
 
-### Lambda de cleanup automatique
-- Scanne EC2, RDS, S3, Lambda pour la conformite
-- Periode de grace de 24h avant suppression
-- Mode DRY_RUN par defaut (simulation sans suppression)
-- Notifications SNS avec rapport detaille
+---
 
-### Lambda de metriques
-- Collecte les taux de conformite des tags
-- Interroge Cost Explorer par Squad/CostCenter
-- Publie dans CloudWatch (namespaces custom)
-- Execution automatique toutes les 6 heures
+## Sécurité
 
-### Dashboard Grafana
-- Visualisation de la conformite des tags
-- Couts par equipe et projet
-- Nombre de ressources et economies estimees
-
-### CI/CD (GitHub Actions)
-- Lint Python avec Flake8
-- Formatage Terraform (`terraform fmt -check`)
-- Validation Terraform (`terraform validate`)
+- `DRY_RUN=true` par défaut — aucune action réelle sans activation explicite
+- Suppression uniquement après approbation humaine (`waitForTaskToken`)
+- Credentials AWS via `aws configure` — jamais dans un fichier du projet
+- Secrets dans SSM Parameter Store (SecureString)
+- IAM least privilege sur toutes les Lambdas
 
 ---
 
 ## Documentation
 
-- [Guide de demarrage](docs/GUIDE_DEMARRAGE.md) - Pas-a-pas pour debutants
-- [Securite](docs/SECURITY.md) - Bonnes pratiques et checklist
-- [Journal de bord](docs/JOURNAL_DE_BORD.md) - Diagnostic d'erreurs et solutions
-- [Module tagged-resources](terraform/modules/tagged-resources/README.md) - Documentation du module
-
----
-
-## Commandes utiles
-
-```bash
-# Valider la syntaxe Terraform
-terraform validate
-
-# Formatter le code Terraform
-terraform fmt -recursive
-
-# Verifier les tags d'une instance EC2
-aws ec2 describe-instances --query 'Reservations[].Instances[].[InstanceId, Tags]'
-
-# Tester la Lambda de cleanup (mode simulation)
-aws lambda invoke --function-name dev-tag-cleanup output.json && cat output.json
-```
+- [Journal de bord](docs/JOURNAL_DE_BORD.md) — historique des décisions et apprentissages
+- [Plan v2](docs/PLAN_V2.md) — roadmap de la restructuration
+- [Sécurité](docs/SECURITY.md) — bonnes pratiques appliquées
 
 ---
 
