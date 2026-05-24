@@ -1,0 +1,22 @@
+# Copy this file to terraform.tfvars and fill in the values.
+# terraform.tfvars is gitignored — never commit real values.
+
+aws_region  = "eu-west-1"
+environment = "dev"
+project     = "red-queen"
+
+# Set to false when ready to enforce tagging in production.
+dry_run = true
+
+# Required — you will receive a confirmation email after terraform apply.
+sns_email = "ops-team@example.com"
+
+# Optional — leave empty to disable Slack notifications.
+slack_webhook_url = ""
+
+# Fallback tag values applied by auto-tagger when a resource has no tags at all.
+default_owner       = "auto-tagger@example.com"
+default_squad       = "unknown"
+default_cost_center = "CC-000"
+
+log_retention_days = 14

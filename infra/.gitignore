@@ -1,0 +1,14 @@
+# Terraform state — never commit
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+*.tfstate
+*.tfstate.*
+
+# Generated Lambda zip bundles
+.builds/
+
+# Local variable overrides — may contain secrets
+terraform.tfvars
+*.auto.tfvars
