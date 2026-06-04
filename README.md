@@ -1,151 +1,373 @@
 # AWS Tagging Governance
 
-[![Quality & Security Check](https://github.com/mboumhawahaga-ship-it/Aws-tagging-gouvernance/actions/workflows/ci-quality.yml/badge.svg)](https://github.com/mboumhawahaga-ship-it/Aws-tagging-gouvernance/actions/workflows/ci-quality.yml)
+serverless AWS tagging enforcement for **FinOps chargeback** and **operational ownership** — no resource deletion.
 
-**Systeme complet de gouvernance de tagging pour AWS**
-
-Forcez le respect des politiques de tagging sur toutes vos ressources AWS pour :
-- Maitriser les couts par equipe
-- Ameliorer la tracabilite
-- Automatiser la gestion du cycle de vie
-- Visualiser les depenses
+[![CI](https://github.com/mboumhawahaga-ship-it/Red_Queen_Optimizer/actions/workflows/ci.yml/badge.svg)](https://github.com/mboumhawahaga-ship-it/Red_Queen_Optimizer/actions/workflows/ci.yml)
 
 ---
 
-## Structure du projet
+## Why this exists (FinOps problem)
+
+In multi-team AWS accounts, spend without standard tags creates two problems:
+
+| Problem | Business impact |
+|---------|-----------------|
+| **Unallocated spend** | Finance cannot charge back by squad, cost center, or environment |
+| **Orphan resources** | No accountable owner → waste continues unnoticed |
+
+This project automates a **four-tag policy** so Cost Explorer can split the bill. It does **not** replace AWS Billing — it makes tags **real** (present, meaningful, maintained).
+
+**Required tags:** `Owner`, `Squad`, `CostCenter`, `Environment`
+
+---
+
+## How to prove cost allocation (FinOps playbook)
+
+Tagging governance and **provable cost** are two linked steps. This repo handles step 1; you prove step 2 in Billing.
+
+### The chain
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ 1. THIS PROJECT          Tags on resources (governance)        │
+│    Auto-tag at create · Config compliance · reject placeholders │
+└───────────────────────────────┬─────────────────────────────────┘
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 2. AWS BILLING (manual once)  Cost allocation tags activated   │
+│    Billing → Cost allocation tags → activate CostCenter, Squad… │
+└───────────────────────────────┬─────────────────────────────────┘
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 3. COST EXPLORER (proof)   Reports & KPIs for leadership       │
+│    Group by CostCenter / Squad · track % allocated spend        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Step 1 — What this project already gives you
+
+| Capability | FinOps value |
+|------------|--------------|
+| Auto-tagger on create | New resources are not born "invisible" to finance |
+| AWS Config `REQUIRED_TAGS` | Ongoing check — tags removed later are caught |
+| Placeholder rejection (`unknown`, `unassigned`) | Tags exist for **allocation**, not checkbox compliance |
+| Alerts + SLA | Owners fix tags before month-end close |
+| CloudWatch metrics | Trend of violations (ops), not euros (Billing) |
+
+**Important:** CloudWatch shows *compliance*; **Cost Explorer shows money**.
+
+### Step 2 — Activate cost allocation tags (one-time per account)
+
+1. Open **AWS Billing** → **Cost allocation tags**.
+2. Activate user-defined tags: `CostCenter`, `Squad`, `Environment`, `Owner`.
+3. Wait **24–48 hours** for data to appear in Cost Explorer.
+
+Without this step, tags on resources **do not** show in cost reports.
+
+### Step 3 — KPIs that prove value (show leadership)
+
+Track monthly (spreadsheet or dashboard):
+
+| KPI | How to measure | Target (example) |
+|-----|----------------|------------------|
+| **Allocated spend %** | Cost Explorer → filter tagged `CostCenter` ≠ empty / total spend | > 90% |
+| **Unallocated spend $** | Group by `CostCenter` → row "No tag" / untagged | Decreasing MoM |
+| **Spend by Squad** | Group by tag `Squad` | Every squad visible |
+| **Placeholder rate** | CloudWatch / DynamoDB: resources with violations | → 0 |
+| **Time to remediate** | `first_seen` → tags fixed (DynamoDB / logs) | < SLA (36h / 7d) |
+
+### Step 4 — Cost Explorer report (copy-paste proof)
+
+**Monthly spend by cost center:**
+
+1. Cost Explorer → **Cost and usage reports**.
+2. Granularity: **Monthly**.
+3. Group by: **Tag** → `CostCenter`.
+4. Filter: Service (optional) EC2, RDS, S3, Lambda.
+
+**Screenshot or CSV export** = proof for FinOps / management.
+
+**CLI example** (after tags are activated in Billing):
+
+```bash
+aws ce get-cost-and-usage \
+  --time-period Start=2026-05-01,End=2026-06-01 \
+  --granularity MONTHLY \
+  --metrics UnblendedCost \
+  --group-by Type=TAG,Key=CostCenter
+```
+
+**Before / after pilot:** Run the same report the month before deploy vs one month after — show `% allocated` increase.
+
+### What counts as "proof" in a review
+
+| Evidence | Audience |
+|----------|----------|
+| Cost Explorer grouped by `CostCenter` / `Squad` | Finance, management |
+| KPI trend: allocated % ↑ | FinOps lead |
+| CloudWatch dashboard: violations ↓ | Engineering / platform |
+| Sample SNS alert + fixed resource | Squad leads |
+
+This project is the **control plane**; Cost Explorer is the **proof plane**.
+
+---
+
+## Architecture
+
+```
+CloudTrail (resource created)
+        │
+        ▼
+EventBridge ──► Auto-Tagger Lambda
+                  Applies defaults on missing keys (never overwrites)
+                  Does NOT set fake FinOps values (no CostCenter=unassigned)
+                  DynamoDB status=auto_tagged · metric AutoTagApplied
+
+AWS Config (NON_COMPLIANT)
+        │
+        ▼
+EventBridge ──► Compliance Evaluator Lambda
+                  Skips handled / active snooze
+                  Rejects placeholder tag values
+                  CRITICAL (36h SLA) vs NON_CRITICAL (7d)
+                  SNS/Slack with alert cooldown (6h / 24h)
+                  DynamoDB · metric TagComplianceViolation
+
+API Gateway (x-api-key) ──► Feedback API
+                  POST /feedback  handled | snoozed
+                  GET  /status
+```
+
+**Supported services:** EC2, RDS, S3, Lambda.
+
+---
+
+## Design principles
+
+| Principle | Implementation |
+|-----------|----------------|
+| No deletion | Tag + alert only — never terminate resources |
+| Event-driven | EventBridge → Lambda (no Step Functions) |
+| Human in the loop | Feedback API: `handled` or `snoozed` (24h) |
+| Safe rollout | `dry_run = true` by default on auto-tagger |
+| Fail visible | SQS DLQ + alarm if events fail |
+| Meaningful tags | Placeholders rejected; auto-tagger skips fake Owner/CostCenter |
+
+---
+
+## Required tags & SLAs
+
+| Tag | Example | FinOps use |
+|-----|---------|------------|
+| `Owner` | `jane.doe@company.com` | Accountability |
+| `Squad` | `DataEngineering` | Team showback |
+| `CostCenter` | `CC-123` | GL / chargeback |
+| `Environment` | `dev` / `prod` | Env split, priority |
+
+| Criticality | When | Remediation SLA |
+|-------------|------|-----------------|
+| `CRITICAL` | All RDS; EC2 `Environment=prod`; `CriticalWorkload=true` | 36 hours |
+| `NON_CRITICAL` | Everything else | 7 days |
+
+**Alert cooldown:** max one SNS/Slack per resource every **6h** (CRITICAL) or **24h** (NON_CRITICAL), unless violation tags change.
+
+---
+
+## Auto-tagger defaults (missing keys only)
+
+```
+Squad       = "unknown" (configurable)
+Environment = var.environment (e.g. dev)
+Status      = needs-review
+ManagedBy   = AutoTagger
+Owner       = IAM email only if detected
+CostCenter  = not set by auto-tagger (team must provide a real value)
+```
+
+---
+
+## Feedback API
+
+```bash
+export API_URL="$(terraform output -raw feedback_api_url)"
+export API_KEY="$(terraform output -raw feedback_api_key)"
+```
+
+```bash
+# Mark resolved (excluded from future evaluations)
+curl -X POST "${API_URL}/feedback" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: ${API_KEY}" \
+  -d '{"resource_id": "i-0abc123", "action": "handled"}'
+
+# Snooze 24h
+curl -X POST "${API_URL}/feedback" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: ${API_KEY}" \
+  -d '{"resource_id": "i-0abc123", "action": "snoozed"}'
+
+# Status
+curl -H "x-api-key: ${API_KEY}" "${API_URL}/status?resource_id=i-0abc123"
+```
+
+Missing or invalid API key → **403** (Lambda not invoked).
+
+---
+
+## Project structure
 
 ```
 aws-tagging-governance/
-├── .github/workflows/
-│   └── ci-quality.yml              # CI/CD : Flake8 + Terraform fmt/validate
-├── terraform/
-│   ├── modules/
-│   │   ├── tagged-resources/       # Module de tagging reutilisable
-│   │   ├── cleanup-lambda/         # Module Lambda de nettoyage
-│   │   └── metrics-lambda/         # Module Lambda de metriques
-│   ├── environments/
-│   │   └── dev/                    # Environnement de dev
-│   └── policies/                   # AWS Config rules (a venir)
-├── lambda/
-│   ├── cleanup/                    # Auto-cleanup des ressources non conformes
-│   └── metrics/                    # Collecte de metriques CloudWatch
-├── grafana/
-│   ├── dashboards/                 # Dashboard de visualisation des couts
-│   └── provisioning/               # Configuration automatique datasources
-├── sensible/                       # Secrets centralises (gitignored)
-│   ├── .env                        # Variables d'environnement (NON commite)
-│   └── .env.example                # Template a copier
-├── scripts/                        # Scripts d'automatisation
-├── docs/                           # Documentation detaillee
-│   ├── GUIDE_DEMARRAGE.md          # Guide pas-a-pas pour debutants
-│   ├── SECURITY.md                 # Bonnes pratiques securite
-│   └── JOURNAL_DE_BORD.md          # Journal de diagnostic et solutions
-└── docker-compose.yml              # Grafana local + CloudWatch
+├── lambdas/
+│   ├── shared/
+│   ├── compliance-evaluator/
+│   ├── auto-tagger/
+│   └── feedback-api/
+├── infra/
+│   ├── config.tf          # AWS Config recorder + REQUIRED_TAGS rule
+│   ├── dlq.tf             # SQS dead-letter queue
+│   ├── eventbridge.tf
+│   ├── apigw.tf
+│   └── ...
+├── tests/
+├── docs/
+│   ├── architecture.md
+│   └── JOURNAL_DE_BORD.md   # design decisions (French)
+└── requirements-dev.txt
 ```
 
 ---
 
-## Tags obligatoires
+## Prerequisites
 
-Toutes les ressources AWS **doivent** avoir ces tags :
+| Tool | Version |
+|------|---------|
+| AWS CLI | configured |
+| Terraform | >= 1.5 |
+| Python | 3.12 |
 
-| Tag | Type | Description | Exemple |
-|-----|------|-------------|---------|
-| `Owner` | string | Email du proprietaire | `jean.dupont@entreprise.com` |
-| `Squad` | string | Equipe responsable | `Data`, `Backend`, `DevOps` |
-| `CostCenter` | string | Centre de couts | `CC-123` |
-| `AutoShutdown` | bool | Arret automatique hors heures | `true` / `false` |
-| `Environment` | string | Environnement | `dev`, `staging`, `prod` |
-
-**Tags automatiques ajoutes** :
-- `ManagedBy` : `Terraform`
-- `CreatedAt` : Timestamp de creation (stable via `time_static`)
+| AWS | Notes |
+|-----|-------|
+| **AWS Config** | Created by Terraform (`infra/config.tf`). Set `enable_aws_config = false` if org already manages Config. |
+| **CloudTrail** | Required for auto-tagger (resource creation events). |
+| **Cost allocation tags** | Manual in Billing console (see FinOps playbook above). |
 
 ---
 
-## Demarrage rapide
+## Multi-account deployment (not automatic)
+
+**This repository is single-account per `terraform apply`.** AWS Config does not make it multi-account — it only evaluates resources in the account where you deploy.
+
+To cover an organization, use the **same stack once per account**:
+
+```
+AWS Organizations
+        │
+        ├── Account: platform-dev     → terraform apply (environment = dev)
+        ├── Account: platform-prod    → terraform apply (environment = prod)
+        └── Account: data-prod        → terraform apply (environment = prod)
+```
+
+| Topic | Per-account behavior |
+|-------|----------------------|
+| Lambdas, EventBridge, DynamoDB, SNS | Isolated in each account |
+| AWS Config (`config.tf`) | Recorder + `REQUIRED_TAGS` rule in each account |
+| Cost allocation proof | Activate tags in **each** account (or use management/payer account Cost Explorer for org-wide spend) |
+| Tag keys | Keep identical (`Owner`, `Squad`, `CostCenter`, `Environment`) everywhere |
+
+**Recommended rollout**
+
+1. Pilot one non-production account → validate tags, alerts, Cost Explorer sample.
+2. Copy `terraform.tfvars` pattern per account (change `environment`, `notification_email`, optional `feedback_api_key`).
+3. Run `terraform apply` with credentials/role for **that** account (separate state file or backend key per account).
+4. Optional later: CI pipeline or CloudFormation StackSets to repeat the same module — no code fork required.
+
+```hcl
+# infra/terraform.tfvars — example: prod workload account
+aws_region         = "eu-west-1"
+environment        = "prod"
+notification_email = "cloud-governance@company.com"
+dry_run            = false
+enable_aws_config  = true   # false only if org already runs Config in this account
+```
+
+**Not included in v2 (org-wide extras):** AWS Config Aggregator, Organizations tag policies, SCPs — typically owned by the cloud foundation team alongside this project.
+
+---
+
+## Deploy
 
 ```bash
-# 1. Cloner le projet
-git clone git clone https://github.com/mboumhawahaga-ship-it/Aws-tagging-gouvernance.git
+cd infra
+cp terraform.tfvars.example terraform.tfvars
+# Set notification_email (required)
 
-# 2. Configurer les secrets
-cp sensible/.env.example sensible/.env
-# Editez sensible/.env avec vos credentials AWS
-
-# 3. Deployer l'infrastructure
-cd terraform/environments/dev
 terraform init
-terraform plan     # Voir ce qui va etre cree
-terraform apply    # Creer les ressources
-
-# 4. Lancer le dashboard Grafana (optionnel)
-cd ../../..
-docker-compose up -d
-# Ouvrir http://localhost:3000
+terraform plan
+terraform apply
 ```
 
----
+After apply:
 
-## Fonctionnalites
-
-### Module Terraform de tagging
-- Tags obligatoires avec validation stricte (regex email, valeurs autorisees)
-- Support EC2, RDS, S3, Lambda
-- Chiffrement automatique (RDS, S3)
-- Generation de mots de passe RDS via Secrets Manager
-
-### Lambda de cleanup automatique
-- Scanne EC2, RDS, S3, Lambda pour la conformite
-- Periode de grace de 24h avant suppression
-- Mode DRY_RUN par defaut (simulation sans suppression)
-- Notifications SNS avec rapport detaille
-
-### Lambda de metriques
-- Collecte les taux de conformite des tags
-- Interroge Cost Explorer par Squad/CostCenter
-- Publie dans CloudWatch (namespaces custom)
-- Execution automatique toutes les 6 heures
-
-### Dashboard Grafana
-- Visualisation de la conformite des tags
-- Couts par equipe et projet
-- Nombre de ressources et economies estimees
-
-### CI/CD (GitHub Actions)
-- Lint Python avec Flake8
-- Formatage Terraform (`terraform fmt -check`)
-- Validation Terraform (`terraform validate`)
+1. Confirm SNS email subscription.
+2. Save outputs: `feedback_api_key`, `feedback_api_url`, `cloudwatch_dashboard_url`.
+3. Activate cost allocation tags in Billing (FinOps).
+4. Start with `dry_run = true`, then set `dry_run = false` when ready.
 
 ---
 
-## Documentation
-
-- [Guide de demarrage](docs/GUIDE_DEMARRAGE.md) - Pas-a-pas pour debutants
-- [Securite](docs/SECURITY.md) - Bonnes pratiques et checklist
-- [Journal de bord](docs/JOURNAL_DE_BORD.md) - Diagnostic d'erreurs et solutions
-- [Module tagged-resources](terraform/modules/tagged-resources/README.md) - Documentation du module
-
----
-
-## Commandes utiles
+## Development
 
 ```bash
-# Valider la syntaxe Terraform
-terraform validate
+pip install -r requirements-dev.txt
+pytest tests/   # 37 tests
+```
 
-# Formatter le code Terraform
-terraform fmt -recursive
+CI: Python tests + `terraform validate` on every push ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
-# Verifier les tags d'une instance EC2
-aws ec2 describe-instances --query 'Reservations[].Instances[].[InstanceId, Tags]'
+---
 
-# Tester la Lambda de cleanup (mode simulation)
-aws lambda invoke --function-name dev-tag-cleanup output.json && cat output.json
+## Terraform outputs
+
+| Output | Use |
+|--------|-----|
+| `feedback_api_url` | API base URL |
+| `feedback_api_key` | `x-api-key` header (sensitive) |
+| `cloudwatch_dashboard_url` | Compliance ops dashboard |
+| `dynamodb_table_name` | Governance state |
+| `lambda_dlq_url` | Failed events queue |
+| `config_rule_name` | AWS Config rule name |
+
+---
+
+## Observability
+
+- **Dashboard:** `tagging-gov-<env>-overview`
+- **Metrics:** `TaggingGovernance` — `TagComplianceViolation`, `AutoTagApplied`
+- **Alarms:** CRITICAL violations, Lambda errors, DLQ not empty
+- **Logs:** KMS-encrypted, retention via `log_retention_days`
+
+Logs Insights example:
+
+```
+fields @timestamp, resource_id, criticality, missing_tags
+| filter status = "non_compliant"
+| sort @timestamp desc
+| limit 50
 ```
 
 ---
 
-## Licence
+## Owner journey
 
-MIT License
+1. Resource created → auto-tagger applies operational defaults.
+2. Missing `Owner` / `CostCenter` → Config NON_COMPLIANT → SNS alert.
+3. Owner sets real tags (chargeback-ready) or uses feedback API.
+4. FinOps runs Cost Explorer by `CostCenter` / `Squad` to prove allocation.
+
+---
+
+## Further reading
+
+- [docs/architecture.md](docs/architecture.md) — technical flows & DynamoDB schema
+- [docs/JOURNAL_DE_BORD.md](docs/JOURNAL_DE_BORD.md) — design log (French)
