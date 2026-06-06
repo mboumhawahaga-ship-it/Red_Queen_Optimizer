@@ -73,6 +73,8 @@ No destructive actions are taken on production resources.
 | **Placeholder Rate** | Invalid or fake values detected | ~0% |
 | **Time to Remediate** | Violation → resolution time | < 36h critical / < 7 days non-critical |
 
+> **Estimated impact:** Enables >90% cost allocation coverage through enforced tagging strategy. Reduces unallocated ("No Tag") spend typically found in 30–60% of AWS environments via continuous compliance enforcement.
+
 ---
 
 ## 🏗️ Architecture Overview
