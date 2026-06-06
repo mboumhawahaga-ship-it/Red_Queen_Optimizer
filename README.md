@@ -1,87 +1,130 @@
 # AWS Cloud Cost Allocation & Tagging Governance Framework
 
-A serverless FinOps automated governance solution designed to eliminate unallocated cloud spend, enable strict cost chargeback, and enforce operational accountability across multi-team AWS environments—without disrupting engineering velocity.
+A serverless FinOps governance system designed to improve cloud cost visibility, enforce resource ownership, and enable reliable chargeback across multi-team AWS environments—without impacting delivery velocity.
 
 ---
 
-## 🎯 Business Value & FinOps Impact
+## 🎯 Business Context
 
-In multi-team organizations, untagged cloud infrastructure directly translates to financial waste and budget blindness. When engineering provisions resources without accounting metadata, Finance cannot allocate costs, causing untracked spend and orphaned resources.
+In multi-team AWS environments, lack of consistent tagging leads to:
 
-This framework bridges the gap between Cloud Engineering and Corporate Finance by automated enforcement of a **4-tag policy** (`Owner`, `Squad`, `CostCenter`, `Environment`).
+- Unallocated cloud spend that cannot be attributed to teams
+- Orphaned resources with no clear ownership
+- Limited visibility for Finance and Engineering leadership
 
-### Key Business Outcomes
-
-- **100% Cost Visibility:** Transforms "Invisible Spend" into accountable, audit-ready data for Cost Explorer and ERP systems.
-- **Automated Chargeback & Showback:** Enables Finance to accurately split the AWS bill by Business Unit, Squad, and Cost Center.
-- **Waste Elimination:** Automatically flags orphaned resources to their respective engineering squads before month-end financial closure.
-- **Zero Engineering Friction:** Enforces compliance through non-destructive alerting and automated metadata discovery, replacing aggressive resource-deletion scripts that break production.
+This creates a gap between cloud usage and financial accountability, making FinOps practices difficult to implement at scale.
 
 ---
 
-## 📊 Business Key Performance Indicators (KPIs)
+## 💡 Business Objectives
 
-This framework is built to drive corporate FinOps success metrics. It provides leadership with the exact data points required to prove governance ROI:
+This framework addresses three core FinOps goals:
 
-| Executive KPI | Measurement Metric | Business Target |
-|---|---|---|
-| **Allocated Spend %** | (Tagged CostCenter Spend / Total AWS Spend) via Cost Explorer | > 90% of total cloud invoice allocated |
-| **Unallocated Waste** | Month-over-Month (MoM) trend of "No Tag" / untagged dollar amount | Decreasing MoM toward zero |
-| **Operational Ownership** | Coverage of the `Squad` and `Owner` tags across all running services | 100% accountability matrix |
-| **Data Integrity Rate** | Percentage of fake/placeholder values rejected by the framework | 0% placeholder tolerance |
-| **Mean Time to Remediate** | Time from violation detection to compliant tagging (SLA Tracker) | Critical: < 36h \| Non-Critical: < 7 days |
+- **Cost Visibility:** ensure all cloud spend can be mapped to business units
+- **Cost Allocation (Chargeback/Showback):** enable accurate financial reporting per team
+- **Operational Accountability:** enforce ownership of cloud resources at creation time
 
 ---
 
-## 🛠️ Strategic Architecture & Governance Flow
+## 📊 Business Outcomes
 
-The architecture is entirely event-driven, cost-optimized (Serverless Pay-per-Use), and acts as the financial control plane for AWS resources.
+### 1. Improved Cost Attribution
+
+Cloud spend becomes structured by:
+
+- Squad
+- Cost Center
+- Environment
+- Resource Owner
+
+→ Enables Finance to build reliable cost allocation reports in AWS Cost Explorer
+
+### 2. Reduced Unallocated Spend
+
+Untagged or mis-tagged resources are detected early and flagged to responsible teams before month-end reporting.
+
+### 3. Stronger Engineering Accountability
+
+Each resource is linked to a clear owning team, reducing:
+
+- orphaned infrastructure
+- unused resources
+- unclear ownership disputes
+
+### 4. Non-Disruptive Governance
+
+Compliance is enforced through:
+
+- automated tagging
+- alerts
+- SLA-based remediation
+
+No destructive actions are taken on production resources.
+
+---
+
+## 📈 FinOps KPIs
+
+| KPI | Description | Target |
+|-----|-------------|--------|
+| **Allocated Spend %** | % of AWS costs mapped to valid tags | > 90% |
+| **Unallocated Spend** | Cost not assigned to any CostCenter | decreasing trend |
+| **Tag Coverage** | Resources with Owner/Squad/CostCenter | 100% |
+| **Placeholder Rate** | Invalid or fake values detected | ~0% |
+| **Time to Remediate** | Violation → resolution time | < 36h critical / < 7 days non-critical |
+
+---
+
+## 🏗️ Architecture Overview
+
+The system is fully event-driven and serverless, acting as a governance layer on top of AWS resource provisioning.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ 1. GOVERNANCE PLANE (This Framework)                            │
-│    Auto-Tagging on Creation · Continuous Compliance Monitoring   │
-│    Placeholder Value Rejection · Automated SLA Alerting         │
-└───────────────────────────────┬─────────────────────────────────┘
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ 2. FINANCIAL INGESTION (AWS Billing)                            │
-│    Activation of User-Defined Cost Allocation Tags              │
-└───────────────────────────────┬─────────────────────────────────┘
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ 3. EXECUTIVE PROOF PLANE (Cost Explorer / Dashboards)           │
-│    Cost Allocation Matrix · Financial Reporting for Leadership  │
-└─────────────────────────────────────────────────────────────────┘
+CloudTrail + EventBridge
+        ↓
+Auto-Tagging Lambda
+  Applies missing operational metadata (when possible)
+        ↓
+AWS Config Rules
+  Continuously evaluates tagging compliance
+        ↓
+SNS / API Layer
+  Notifies and engages responsible teams
+        ↓
+AWS Cost Explorer
+  Provides financial reporting and validation layer
 ```
-
-### Technical Blueprint
-
-- **Real-Time Contextual Auto-Tagger:** Monitors CloudTrail via EventBridge. On resource creation, a Lambda function extracts IAM context and dynamically injects operational metadata (e.g., `Owner` from IAM identity) without overwriting manual inputs.
-
-- **Continuous Compliance Engine:** AWS Config evaluates resource state continuously against business rules. It strictly rejects placeholder compliance bypassing (e.g., `CostCenter=unassigned` or `unknown`).
-
-- **Tiered Business SLAs:**
-  - **CRITICAL (36h SLA):** Production environments, RDS Databases, High-Cost EC2 Instances. Immediate SNS/Slack alerting to Squad Leads.
-  - **NON_CRITICAL (7-day SLA):** Non-production environments, ephemeral workloads.
-
-- **Feedback & Exception API:** An API Gateway backed by DynamoDB allows engineering leads to legally snooze alerts (24h) for maintenance windows or mark issues as `handled`, providing operational flexibility without breaking compliance.
 
 ---
 
-## 📋 FinOps Playbook: Generating Executive Proof
+## ⚙️ Governance Model
 
-To prove the financial impact to Stakeholders and CFOs, follow this reporting protocol:
+### Tag Policy (Required)
 
-### 1. Financial Data Ingestion
+| Tag | Purpose |
+|-----|---------|
+| `Owner` | accountability |
+| `Squad` | engineering team ownership |
+| `CostCenter` | financial allocation |
+| `Environment` | workload classification |
 
-1. Navigate to **AWS Billing** ➔ **Cost allocation tags**.
-2. Activate: `CostCenter`, `Squad`, `Environment`, and `Owner`.
-3. Allow **24–48 hours** for data propagation into financial systems.
+### SLA-Based Enforcement
 
-### 2. Executive Cost Allocation Reporting
+| Severity | Scope | SLA |
+|----------|-------|-----|
+| **CRITICAL** | Production workloads / high-cost resources | 36h |
+| **NON-CRITICAL** | Non-production / ephemeral workloads | 7 days |
 
-Execute the following query via AWS CLI or mirror the filters in Cost Explorer to generate the monthly Business Unit spend breakdown:
+---
+
+## 🧾 FinOps Reporting Flow
+
+1. Activate cost allocation tags in AWS Billing
+2. Wait for data propagation (24–48h)
+3. Use Cost Explorer grouped by `CostCenter`
+4. Compare pre/post deployment allocation rates
+
+Example query:
 
 ```bash
 aws ce get-cost-and-usage \
@@ -91,36 +134,18 @@ aws ce get-cost-and-usage \
   --group-by Type=TAG,Key=CostCenter
 ```
 
-> 💡 **The FinOps Proof:** Run this report the month prior to deployment vs. one month post-deployment. The business success is proven by the sharp percentage increase of allocated spend and the reduction of the "Untagged / No Tag" line item.
-
 ---
 
-## 🚀 Deployment & Operational Readiness
+## 🚀 Deployment Strategy
 
-### Repository Structure
-
-```
-aws-tagging-governance/
-├── lambdas/                   # Core business & compliance logic (Python 3.12)
-│   ├── auto-tagger/           # Real-time metadata injection
-│   ├── compliance-evaluator/  # SLA tracking & placeholder validation
-│   └── feedback-api/          # Engineering lifecycle management
-├── infra/                     # Infrastructure as Code (Terraform >= 1.5)
-│   ├── config.tf              # AWS Config governance rules
-│   └── apigw.tf, eventbridge.tf, dlq.tf
-└── tests/                     # Enterprise stability (37 unit/integration tests)
-```
-
-### Enterprise Rollout Strategy
-
-1. **Pilot Phase:** Deploy to a single non-production workload account with `dry_run = true` to observe compliance baselines via the CloudWatch Executive Dashboard (`tagging-gov-<env>-overview`).
-2. **Multi-Account Scaling:** Scale horizontally across the AWS Organization by isolating state files per account (`platform-dev`, `platform-prod`, `data-prod`) utilizing standard `terraform.tfvars` configurations.
-3. **Enforcement Phase:** Transition `dry_run = false` to activate active alerting and SLA tracking.
+1. Pilot in a single AWS account (non-production)
+2. Validate tagging compliance and alert flow
+3. Scale per account using identical Terraform module
+4. Enable enforcement after validation phase (`dry_run = false`)
 
 ```bash
 cd infra
 cp terraform.tfvars.example terraform.tfvars
-# Configure environment-specific notification channels & variables
 terraform init
 terraform plan
 terraform apply
@@ -128,4 +153,12 @@ terraform apply
 
 ---
 
-*Developed with a FinOps-first mindset. Ensuring every dollar spent in the cloud is a dollar accounted for.*
+## 💼 Why this project matters
+
+This framework demonstrates:
+
+- FinOps engineering mindset (cost + governance + automation)
+- AWS event-driven architecture design
+- Multi-team cloud governance at scale
+- Production-ready observability & SLA enforcement
+- Strong alignment between Engineering and Finance
