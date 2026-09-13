@@ -1,5 +1,5 @@
 """
-Feedback API — Red Queen Governance (Phase 3)
+Feedback API Lambda.
 
 API Gateway Lambda proxy integration.
 
@@ -13,8 +13,7 @@ Actions (defined in shared/constants VALID_ACTIONS):
   tag      → status=resolved  owner claims required tags have been added
   reject   → status=alerted   owner disputes the finding; re-enters normal SLA flow
 
-No HMAC tokens, no Step Functions task tokens.
-Authentication is handled at the API Gateway layer (IAM / Cognito).
+No signed tokens in the payload: authentication is expected at the API Gateway layer (IAM / Cognito).
 """
 
 import os

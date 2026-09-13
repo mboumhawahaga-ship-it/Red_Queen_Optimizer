@@ -1,5 +1,5 @@
 """
-Compliance Evaluator Lambda — Phase 1 of Red Queen migration.
+Compliance Evaluator Lambda.
 
 Triggered by:
   - EventBridge rule matching AWS Config NON_COMPLIANT changes
@@ -9,10 +9,14 @@ Flow (initial trigger):
   1. Extract resource_id, resource_type, tags from event
   2. classify_resource → CRITICAL / NON_CRITICAL
   3. get_governance_record → skip if already 'handled'
-  4. check_required_tags → if compliant, put record + return
+  4. check_required_tags → if compliant, put record + metric + return
   5. send_sns + send_slack (tiered SLA)
   6. put_governance_record(event=alerted, sla_deadline=now+SLA_HOURS)
   7. schedule EventBridge Scheduler one-shot at sla_deadline
+  8. put_governance_metric(outcome=alerted)
+
+Every outcome (compliant / alerted / resolved / quarantined) also publishes a
+CloudWatch metric in the RedQueen/Governance namespace for the Grafana dashboard.
 
 Flow (SLA re-invoke):
   1. Re-check tags via AWS APIs
@@ -31,12 +35,12 @@ import boto3
 from botocore.exceptions import ClientError
 
 from ..shared.utils import (
-    sanitize_resource_id,
     sanitize_log_value,
     check_required_tags,
     classify_resource,
     put_governance_record,
     get_governance_record,
+    put_governance_metric,
     send_sns,
     send_slack,
     tags_list_to_dict,
@@ -99,6 +103,7 @@ def _handle_compliance_event(event: Dict[str, Any]) -> Dict[str, Any]:
             environment=tags_list_to_dict(tags).get("Environment", "unknown"),
             dry_run=DRY_RUN,
         )
+        put_governance_metric("compliant", resource_type, criticality)
         logger.info("resource=%s is compliant", safe_id)
         return {"status": "compliant", "resource_id": resource_id}
 
@@ -127,6 +132,9 @@ def _handle_compliance_event(event: Dict[str, Any]) -> Dict[str, Any]:
     # 7. schedule re-invoke
     if not DRY_RUN:
         _schedule_sla_check(resource_id, resource_type, criticality, sla_deadline, region)
+
+    # 8. metric
+    put_governance_metric("alerted", resource_type, criticality)
 
     return {
         "status":       "alerted",
@@ -164,6 +172,7 @@ def _handle_sla_deadline(event: Dict[str, Any]) -> Dict[str, Any]:
             dry_run=DRY_RUN,
             extra={"status": "resolved"},
         )
+        put_governance_metric("resolved", resource_type, criticality)
         logger.info("resource=%s resolved before SLA deadline", safe_id)
         if schedule_name and not DRY_RUN:
             _delete_schedule(schedule_name)
@@ -184,6 +193,7 @@ def _handle_sla_deadline(event: Dict[str, Any]) -> Dict[str, Any]:
     if schedule_name and not DRY_RUN:
         _delete_schedule(schedule_name)
 
+    put_governance_metric("quarantined", resource_type, criticality)
     logger.info("resource=%s quarantined (SLA breached)", safe_id)
     return {"status": "quarantined", "resource_id": resource_id, "missing_tags": missing}
 

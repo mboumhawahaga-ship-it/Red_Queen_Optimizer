@@ -1,0 +1,5 @@
+[flake8]
+max-line-length = 120
+# E221/E241: aligned assignments and dict values are used deliberately for readability
+extend-ignore = E221, E241
+exclude = .git,__pycache__,.builds,.terraform

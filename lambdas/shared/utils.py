@@ -7,10 +7,10 @@ Covers:
   - Classification      (classify_resource)
   - DynamoDB helpers    (put_governance_record, get_governance_record)
   - Notifications       (send_sns, send_slack)
+  - Metrics             (put_governance_metric)
 """
 
 import re
-import os
 import time
 import json
 import logging
@@ -20,12 +20,14 @@ from datetime import datetime, timezone
 from typing import Dict, List, Tuple, Optional, Any
 
 import boto3
-from botocore.exceptions import ClientError
 
 from .constants import (
     REQUIRED_TAGS,
     CRITICAL_RESOURCE_TYPES,
     TTL_DAYS,
+    METRICS_NAMESPACE,
+    METRIC_GOVERNANCE_EVENTS,
+    METRIC_OUTCOMES,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,7 +75,6 @@ def tags_dict_to_list(tags: Dict[str, str]) -> List[Dict[str, str]]:
 def check_required_tags(tags: List[Dict[str, str]]) -> Tuple[bool, List[str]]:
     """
     Return (is_compliant, missing_tag_names).
-    Extracted verbatim from lambda/cleanup/handler.py.
     """
     keys = [t.get("Key") for t in tags] if tags else []
     missing = [t for t in REQUIRED_TAGS if t not in keys]
@@ -91,8 +92,6 @@ def classify_resource(resource_type: str, tags: List[Dict[str, str]]) -> str:
       2. resource_type in CRITICAL_TYPES     → CRITICAL  (rds)
       3. EC2 with Environment=prod           → CRITICAL
       4. Everything else                     → NON_CRITICAL
-
-    Extracted verbatim from lambda/cleanup/handler.py::classify_resource().
     """
     tag_map = tags_list_to_dict(tags)
 
@@ -126,12 +125,7 @@ def put_governance_record(
 ) -> None:
     """
     Write a governance event record to DynamoDB.
-
-    Unified replacement for the three separate persist functions spread
-    across cleanup/handler.py, auto_tagger/handler.py, and
-    step_function/remediate_resource.py — identical schema, single place.
-
-    Uses timezone-aware UTC (fixes the deprecated datetime.utcnow() calls).
+    Single persistence function shared by all Lambdas — identical schema everywhere.
     """
     if not table_name:
         return
@@ -173,8 +167,7 @@ def get_governance_record(
     Returns None if not found.
 
     Uses ScanIndexForward=False to get the latest record first,
-    then applies event_filter via FilterExpression to avoid
-    client-side filtering over 20 items (fixes the existing debt).
+    then applies event_filter via FilterExpression server-side.
     """
     if not table_name:
         return None
@@ -213,7 +206,6 @@ def get_governance_record(
 def send_sns(topic_arn: str, subject: str, message: str) -> bool:
     """
     Publish a message to SNS. Returns True on success.
-    Extracted from lambda/step_function/notify.py::_send_email().
     """
     if not topic_arn:
         logger.warning("SNS_TOPIC_ARN not configured — email skipped")
@@ -235,10 +227,8 @@ def send_slack(webhook_url: str, payload: Dict[str, Any]) -> bool:
     """
     POST a Slack webhook payload. Returns True on success.
 
-    Adds an explicit https:// guard before urllib.urlopen
-    to prevent SSRF via file:// or custom schemes (Amazon Q fix).
-
-    Extracted from lambda/step_function/notify.py::_send_slack().
+    An explicit https:// guard before urllib.urlopen prevents SSRF via
+    file:// or custom schemes.
     """
     if not webhook_url:
         logger.info("SLACK_WEBHOOK_URL not configured — Slack skipped")
@@ -261,4 +251,50 @@ def send_slack(webhook_url: str, payload: Dict[str, Any]) -> bool:
         return True
     except urllib.error.URLError as exc:
         logger.error("Slack error: %s", exc)
+        return False
+
+# ── CloudWatch metrics ────────────────────────────────────────────────────────
+
+
+def put_governance_metric(outcome: str, resource_type: str, criticality: str = "UNKNOWN") -> bool:
+    """
+    Publish one GovernanceEvents datapoint (value=1) to CloudWatch.
+
+    Two datapoints are written per call because CloudWatch dimensions are an
+    exact match — a metric with {Outcome} cannot be aggregated from metrics
+    with {Outcome, ResourceType}:
+      - {Outcome}                              → global counters
+      - {Outcome, ResourceType, Criticality}   → breakdown panels
+
+    Metrics are published even in DRY_RUN mode: seeing what *would* happen is
+    the whole point of a dry run. Returns True on success; never raises.
+    """
+    if outcome not in METRIC_OUTCOMES:
+        logger.warning("put_governance_metric: unknown outcome %r — skipped", outcome)
+        return False
+
+    now = datetime.now(timezone.utc)
+    base = {
+        "MetricName": METRIC_GOVERNANCE_EVENTS,
+        "Timestamp": now,
+        "Value": 1,
+        "Unit": "Count",
+    }
+    metric_data = [
+        {**base, "Dimensions": [{"Name": "Outcome", "Value": outcome}]},
+        {**base, "Dimensions": [
+            {"Name": "Outcome",       "Value": outcome},
+            {"Name": "ResourceType",  "Value": resource_type or "unknown"},
+            {"Name": "Criticality",   "Value": criticality or "UNKNOWN"},
+        ]},
+    ]
+
+    try:
+        boto3.client("cloudwatch").put_metric_data(
+            Namespace=METRICS_NAMESPACE,
+            MetricData=metric_data,
+        )
+        return True
+    except Exception as exc:
+        logger.warning("CloudWatch metric error (%s/%s): %s", outcome, resource_type, exc)
         return False

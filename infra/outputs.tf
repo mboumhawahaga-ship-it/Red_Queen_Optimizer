@@ -39,3 +39,8 @@ output "scheduler_role_arn" {
   description = "IAM role assumed by EventBridge Scheduler when invoking compliance-evaluator"
   value       = aws_iam_role.scheduler_execution.arn
 }
+
+output "metrics_namespace" {
+  description = "CloudWatch namespace where compliance-evaluator publishes GovernanceEvents (used by Grafana)"
+  value       = local.metrics_namespace
+}

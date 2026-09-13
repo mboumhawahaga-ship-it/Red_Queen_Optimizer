@@ -1,5 +1,5 @@
 """
-AUTO-TAGGER — Red Queen Governance (Phase 2 migration)
+Auto-Tagger Lambda.
 
 Listens to CloudTrail events via EventBridge and automatically applies
 missing required tags on newly created resources.
@@ -19,7 +19,7 @@ import os
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 
 import boto3
 from botocore.exceptions import ClientError
