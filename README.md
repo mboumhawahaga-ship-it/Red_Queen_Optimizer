@@ -1,280 +1,174 @@
-# Red Queen - AWS Tag Governance Platform
+# Red Queen — AWS Tag Governance
 
-## Overview
+Serverless platform that enforces mandatory tags on AWS resources so that cloud costs can be attributed to a team, an owner and a cost center. Built as a self-taught FinOps / infrastructure project: Terraform, Python 3.12 Lambdas, unit tests, CI, Grafana.
 
-Red Queen is a serverless cloud governance platform designed to automate AWS tagging compliance at scale.
-
-The platform continuously detects non-compliant resources, automatically applies default tags, notifies responsible teams, and enforces remediation Service Level Agreements (SLAs).
-
-If resources remain non-compliant beyond their remediation window, Red Queen automatically quarantines them to prevent unmanaged cloud consumption and improve cost accountability.
-
-The platform enables organizations to establish proactive cloud governance without slowing down engineering teams.
+Every number in this README can be checked in the repository.
 
 ---
 
-## Business Problem
+## The problem
 
-Cloud cost allocation, security governance, and operational ownership heavily depend on tagging.
+Cost allocation in AWS depends on tags. Without `Owner`, `Squad`, `CostCenter` and `Environment` on every resource, a monthly bill is just a total: nobody knows which team spent what, orphaned resources keep running, and finance cannot charge back.
 
-In practice, engineering teams frequently deploy resources without the required metadata due to:
+In practice tags go missing all the time: a quick test instance, a bucket created from the console, a Lambda deployed by hand. Asking people to "remember to tag" does not scale.
 
-* Deployment speed pressures.
-* Infrastructure automation gaps.
-* Human error.
-* Inconsistent governance processes.
+## The goal
 
-Missing tags create several problems:
+Make untagged resources impossible to ignore, without blocking engineers:
 
-* Cloud costs cannot be attributed accurately.
-* Ownership becomes unclear.
-* Compliance requirements cannot be enforced.
-* Unmanaged resources accumulate over time.
+1. Tag new resources automatically with sensible defaults, at creation time.
+2. Detect resources that are still missing required tags.
+3. Notify the owner and start an SLA clock.
+4. If the SLA expires, quarantine the resource (tag it `Status=needs-review`) — never delete it.
+5. Give owners a way to respond (fix, dispute, or mark as intentionally exempt).
+6. Measure everything on a dashboard.
 
-Red Queen automates the entire tagging governance lifecycle.
+## What is actually implemented
 
----
-
-## Key Features
-
-* Automatic resource tagging at creation time.
-* Continuous compliance evaluation using AWS Config.
-* Criticality classification based on workload type and business metadata.
-* SLA-driven remediation workflows.
-* Automated quarantine for unresolved violations.
-* Multi-channel notifications (Email + Slack).
-* Manual governance feedback API.
-* Real-time governance dashboards.
-* Dry-run mode for safe validation.
-* End-to-end encryption using AWS KMS.
-
----
+| Capability | Where | Status |
+|---|---|---|
+| Auto-tagging on creation (EC2, S3, RDS, Lambda) | `lambdas/auto-tagger` | done |
+| Compliance evaluation on AWS Config findings | `lambdas/compliance-evaluator` | done |
+| Criticality classification (CRITICAL / NON_CRITICAL) | `lambdas/shared/utils.py` | done |
+| SLA enforcement: 36 h critical, 7 days non-critical | `lambdas/shared/constants.py` | done |
+| One-shot SLA timer via EventBridge Scheduler | `compliance-evaluator` | done |
+| Quarantine by tagging (no stop, no delete) | `compliance-evaluator` | done |
+| Email (SNS) + Slack notifications | `lambdas/shared/utils.py` | done |
+| Owner feedback API (approve / tag / reject) | `lambdas/feedback-api` + API Gateway | done |
+| Governance event history with 90-day TTL | DynamoDB | done |
+| CloudWatch metrics per outcome + Grafana dashboard | `compliance-evaluator`, `grafana/` | done |
+| Dry-run mode (default) | all Lambdas | done |
+| Multi-account (AWS Organizations) | — | not started |
+| Budget alerts | — | not started |
 
 ## Architecture
 
-Governance workflow:
-
 ```
-CloudTrail Resource Creation
-                ↓
-         EventBridge
-                ↓
-        Auto-Tagging Lambda
-                ↓
-          AWS Config
-                ↓
-    Compliance Evaluation
-                ↓
-      SLA-based Notifications
-                ↓
-      EventBridge Scheduler
-                ↓
-Automatic Remediation or Quarantine
+ CloudTrail "Create*" event ──► EventBridge ──► auto-tagger ──► applies default tags
+                                                                 └─► DynamoDB (event=auto_tag)
+
+ AWS Config NON_COMPLIANT ───► EventBridge ──► compliance-evaluator
+                                                 ├─► SNS email + Slack alert
+                                                 ├─► DynamoDB (event=alerted, sla_deadline)
+                                                 ├─► CloudWatch metric (Outcome=alerted)
+                                                 └─► EventBridge Scheduler one-shot at SLA deadline
+                                                                │
+                                          SLA deadline ─────────┘
+                                                 │
+                                       re-check live tags
+                                       ├─ compliant     → DynamoDB resolved    + metric
+                                       └─ still missing → quarantine tags + DynamoDB quarantined + metric
+
+ Owner ──► API Gateway (IAM auth) ──► feedback-api ──► DynamoDB (handled / resolved / alerted)
+
+ Grafana (local, Docker) ◄── CloudWatch RedQueen/Governance metrics
 ```
 
-The entire platform operates using a fully serverless architecture.
+Two separate EventBridge rules route CloudTrail events to `auto-tagger` only and Config events to `compliance-evaluator` only. Merging them would let the evaluator fire before the tagger has finished.
 
----
+## Governance model
 
-## AWS Services
+**Required tags:** `Owner`, `Squad`, `CostCenter`, `Environment`
 
-* AWS Lambda
-* Amazon EventBridge
-* AWS Config
-* AWS CloudTrail
-* Amazon DynamoDB
-* Amazon SNS
-* Amazon API Gateway
-* AWS KMS
-* Amazon CloudWatch
-* AWS IAM
+**Criticality** (evaluated in this order):
 
----
+1. `CriticalWorkload=true` tag → CRITICAL
+2. RDS instance → CRITICAL
+3. EC2 with `Environment=prod` → CRITICAL
+4. Anything else → NON_CRITICAL
 
-## Governance Model
-
-### Mandatory Tags
-
-The platform enforces the following business metadata:
-
-* Owner
-* Squad
-* CostCenter
-* Environment
-
-### Criticality Classification
-
-Resources are classified automatically:
-
-**Critical**
-
-* RDS instances.
-* Production EC2 instances.
-* Resources tagged `CriticalWorkload=true`.
-
-**Non-Critical**
-
-* Development and non-production workloads.
-
-### SLA Enforcement
-
-| Resource Type | SLA |
+| Criticality | SLA before quarantine |
 |---|---|
-| Critical workloads | 36 hours |
-| Non-critical workloads | 7 days |
+| CRITICAL | 36 hours |
+| NON_CRITICAL | 168 hours (7 days) |
 
----
+**Quarantine** adds three tags (`Status=needs-review`, `QuarantinedAt`, `QuarantineReason`). The platform never stops or deletes a resource; that decision stays with a human.
 
-## Automated Remediation Workflow
+**Feedback actions** (`POST /feedback`):
 
-1. Resource created.
-2. Tags validated.
-3. Missing tags automatically applied.
-4. Non-compliant resources detected.
-5. Teams notified.
-6. SLA timer started.
-7. Resource re-evaluated.
-8. Automatic quarantine applied if still non-compliant.
-
----
-
-## Lambda Functions
-
-| Function | Trigger | Role |
+| Action | Resulting status | Meaning |
 |---|---|---|
-| `auto-tagger` | EventBridge (CloudTrail creates) | Applies default tags on resource creation |
-| `compliance-evaluator` | EventBridge (Config NON_COMPLIANT) + Scheduler | Evaluates, alerts, quarantines |
-| `feedback-api` | API Gateway v2 | Manual approval and correction interface |
+| `tag` | resolved | owner added the tags |
+| `approve` | handled | resource is intentionally exempt, excluded from future evaluation |
+| `reject` | alerted | owner disputes the finding; normal SLA flow resumes |
 
----
+## Metrics and dashboard
 
-## FinOps Capabilities
+`compliance-evaluator` publishes one `GovernanceEvents` datapoint per run to the `RedQueen/Governance` CloudWatch namespace, with dimensions `Outcome` (compliant / alerted / resolved / quarantined), `ResourceType` and `Criticality`. Metrics are published in dry-run mode too, so the dashboard can be validated before enforcement is switched on.
 
-| Capability | Status |
-|---|---|
-| Tag Compliance Automation | ✓ |
-| Cost Attribution Enforcement | ✓ |
-| Automated Remediation | ✓ |
-| Governance SLA Management | ✓ |
-| Quarantine Workflow | ✓ |
-| Cost Visibility Dashboard | ✓ |
-| Serverless Governance | ✓ |
-| Budget Governance | Planned |
+The Grafana dashboard (`grafana/dashboards/red-queen-governance.json`) shows those counters over time, the split by outcome, alerts by resource type, quarantines by criticality, and the native `AWS/Billing` estimated charges.
 
----
+`scripts/publish_demo_metrics.py` publishes 12 sample events through the same helper the Lambda uses, so the dashboard can be seen before any real event arrives.
 
-## Estimated Business Impact
+## Security
 
-Conservative estimates based on FinOps industry practices:
+- Customer-managed KMS key with rotation enabled; used for DynamoDB, SNS and all four CloudWatch log groups (log groups are pre-created by Terraform so Lambda never creates unencrypted ones).
+- One IAM role per Lambda (4 roles, 9 inline policies). `PutMetricData` is restricted to the project namespace; `PassRole` to the scheduler is conditioned on `iam:PassedToService`.
+- Feedback API routes require AWS IAM (SigV4) authorization. Without it anyone could exempt a resource with `action=approve`.
+- Resource IDs are validated against an allow-list regex before any DynamoDB or log write; the Slack webhook URL must be `https://`.
+- `dry_run = true` by default: Lambdas log intent but write nothing to AWS APIs.
+- DynamoDB point-in-time recovery and 90-day TTL on governance records.
 
-* Improve enterprise tag compliance rates from an estimated 50–70% to more than 90%.
-* Increase cloud cost allocation coverage to above 90%.
-* Reduce manual governance effort by an estimated 60–80%.
-* Accelerate remediation of governance violations through automated workflows.
-* Reduce unmanaged cloud resources and orphaned spend.
+## Repository layout
 
----
+```
+infra/          Terraform (12 files, 38 resources): Lambdas, IAM, EventBridge, API Gateway, DynamoDB, KMS, SNS, logs
+lambdas/        3 Lambdas + shared module (~1,550 lines of Python)
+  auto-tagger/
+  compliance-evaluator/
+  feedback-api/
+  shared/       constants, sanitisation, classification, DynamoDB, notifications, metrics
+grafana/        provisioned CloudWatch datasource + dashboard
+scripts/        demo metrics publisher, tag validation script
+docs/           engineering journal (errors met, fixes, lessons) — covers the earlier v1 as well
+```
 
-## Example Scenario
+## Quality
 
-Organization size:
+- 89 unit tests (pytest + moto): 41 on the compliance evaluator, 31 on the feedback API, 9 on the shared module, plus parametrised cases.
+- CI on every push: flake8, pytest on Python 3.12 (same as the Lambda runtime), `terraform fmt -check`, `terraform validate`, dashboard JSON validation.
+- Single source of truth for names (`infra/locals.tf`) and for governance rules (`lambdas/shared/constants.py`).
 
-* 500 AWS resources.
-* 10 engineering teams.
+## Getting started
 
-Typical situation without governance:
+Prerequisites on the target account and region (not created by this Terraform):
 
-* 30–50% of resources partially or completely untagged.
-* Multiple days required for remediation.
-
-With Red Queen:
-
-* Continuous compliance monitoring.
-* Automated remediation.
-* SLA enforcement.
-* Full audit history for every governance event.
-
----
-
-## Security Controls
-
-### Encryption
-
-* Customer-managed KMS key with automatic rotation.
-* Encryption applied to DynamoDB, SNS and CloudWatch Logs.
-
-### Identity & Access
-
-* Dedicated IAM role per Lambda.
-* Least-privilege permissions model.
-
-### Input Validation
-
-* Resource identifier sanitization.
-* Log injection protection.
-* SSRF protection for external webhooks.
-
-### Safe Operations
-
-* DRY_RUN mode preventing accidental modifications.
-* Strict EventBridge routing preventing race conditions between auto-tagger and compliance-evaluator.
-
----
-
-## DevOps & Quality
-
-* Infrastructure as Code with Terraform (flat + modular architecture).
-* Automated CI pipeline with GitHub Actions (flake8, terraform fmt, terraform validate).
-* Unit tests with pytest.
-* Local Grafana dashboards (CloudWatch datasource, Docker Compose).
-* Modular Terraform architecture under `terraform/modules/`.
-
----
-
-## Getting Started
+- a CloudTrail trail delivering management events (needed for `auto-tagger` to receive create events),
+- an AWS Config recorder with a `required-tags` managed rule for `Owner`, `Squad`, `CostCenter`, `Environment`.
 
 ```bash
-# 1. Copy and configure variables
-cp infra/terraform.tfvars.example infra/terraform.tfvars
+# 1. Configure
+cp infra/terraform.tfvars.example infra/terraform.tfvars   # set sns_email, optionally slack_webhook_url
 
-# 2. Deploy (dry-run enabled by default)
+# 2. Deploy — dry-run is on by default
 cd infra
 terraform init
-terraform apply \
-  -var="sns_email=your@email.com"
+terraform apply
+# confirm the SNS subscription email
 
-# 3. Start local Grafana dashboard
-cd sensible
-cp .env.example .env
-# fill in AWS credentials and Grafana password
+# 3. Run the tests locally
 cd ..
-docker-compose up -d
-# Open http://localhost:3000
+pip install -r requirements-dev.txt
+pytest lambdas -q
+
+# 4. Dashboard
+cp sensible/.env.example sensible/.env                     # Grafana password + read-only AWS keys
+docker compose up -d                                       # http://localhost:3000
+python scripts/publish_demo_metrics.py                     # optional sample data
 ```
 
----
+When alerts and the dashboard look right, set `dry_run = false` and re-apply.
 
-## Technical Highlights
+## What I learned
 
-* Event-driven serverless architecture.
-* SLA-based automation workflows.
-* Governance-as-Code principles.
-* Automated compliance remediation.
-* Serverless API layer.
-* FinOps-driven governance model.
-* Cloud-native observability.
+The first version (see `docs/JOURNAL_DE_BORD.md`) deleted non-compliant resources after a grace period and orchestrated everything with Step Functions. It worked, but deletion is the wrong default for a governance tool and the orchestration was more code than the problem needed. The rewrite moved to tag-based quarantine, one-shot EventBridge schedules, and a shared module so the three Lambdas persist and notify the same way.
 
----
+## Roadmap
 
-## Future Improvements
-
-* AWS Organizations multi-account support.
-* Budget governance integration.
-* Automated exception workflows.
-* FinOps scorecards.
-* Policy-as-Code integration.
-* Service Catalog integration.
-
----
+- Terraform-managed CloudTrail and Config rule so the stack is self-contained.
+- AWS Organizations / multi-account evaluation.
+- Budget alerts tied to `CostCenter`.
+- Remote Terraform backend (S3 + DynamoDB lock).
 
 ## License
 
