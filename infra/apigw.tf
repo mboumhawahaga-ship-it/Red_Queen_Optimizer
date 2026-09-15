@@ -3,6 +3,10 @@
 # payload_format_version = "1.0" is required because feedback-api/handler.py reads
 # event["httpMethod"] and event["queryStringParameters"], which are the v1 payload format.
 # v2 format uses event["requestContext"]["http"]["method"] instead.
+#
+# Both routes require AWS_IAM authorization (SigV4). Without it the API would be
+# public and anyone could POST action=approve to exempt a resource from governance.
+# Call it with an IAM identity, e.g. `awscurl --service execute-api ...`.
 
 resource "aws_apigatewayv2_api" "feedback" {
   name          = "${local.name_prefix}-feedback"
@@ -27,15 +31,17 @@ resource "aws_apigatewayv2_integration" "feedback_lambda" {
 }
 
 resource "aws_apigatewayv2_route" "get_feedback" {
-  api_id    = aws_apigatewayv2_api.feedback.id
-  route_key = "GET /feedback"
-  target    = "integrations/${aws_apigatewayv2_integration.feedback_lambda.id}"
+  api_id             = aws_apigatewayv2_api.feedback.id
+  authorization_type = "AWS_IAM"
+  route_key          = "GET /feedback"
+  target             = "integrations/${aws_apigatewayv2_integration.feedback_lambda.id}"
 }
 
 resource "aws_apigatewayv2_route" "post_feedback" {
-  api_id    = aws_apigatewayv2_api.feedback.id
-  route_key = "POST /feedback"
-  target    = "integrations/${aws_apigatewayv2_integration.feedback_lambda.id}"
+  api_id             = aws_apigatewayv2_api.feedback.id
+  authorization_type = "AWS_IAM"
+  route_key          = "POST /feedback"
+  target             = "integrations/${aws_apigatewayv2_integration.feedback_lambda.id}"
 }
 
 resource "aws_apigatewayv2_stage" "default" {

@@ -216,6 +216,20 @@ resource "aws_iam_role_policy" "compliance_evaluator_operations" {
         ]
         Resource = "*"
       },
+      # Publish governance metrics for the Grafana dashboard.
+      # PutMetricData has no resource-level ARN; the namespace condition
+      # is the only way to scope it.
+      {
+        Sid      = "PublishGovernanceMetrics"
+        Effect   = "Allow"
+        Action   = ["cloudwatch:PutMetricData"]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "cloudwatch:namespace" = local.metrics_namespace
+          }
+        }
+      },
     ]
   })
 }

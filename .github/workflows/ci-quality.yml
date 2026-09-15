@@ -1,35 +1,53 @@
-name: "\U0001F680 Quality & Security Check"
+name: CI
 
-# Le robot se lance à chaque "push" sur ton GitHub
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
 
 jobs:
-  lint-and-validate:
+  python:
+    name: Python lint + tests
     runs-on: ubuntu-latest
     steps:
-      - name: "\U0001F4E5 Récupérer le code"
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: "\U0001F40D Configurer Python"
-        uses: actions/setup-python@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          # Must match local.lambda_runtime in infra/locals.tf
+          python-version: "3.12"
 
-      - name: "\U0001F50D Vérifier la qualité Python (Flake8)"
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: flake8
+        run: flake8 lambdas scripts
+
+      - name: pytest
+        run: pytest lambdas -q
+
+  terraform:
+    name: Terraform fmt + validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.x"
+
+      - name: terraform fmt
+        run: terraform fmt -recursive -check -diff infra/
+
+      - name: terraform validate
+        working-directory: infra
         run: |
-          pip install flake8
-          # Vérifie les erreurs de syntaxe dans ta Lambda
-          flake8 lambda/cleanup/handler.py --count --select=E9,F63,F7,F82 --show-source --statistics
-
-      - name: "\U0001F3D7\uFE0F Configurer Terraform"
-        uses: hashicorp/setup-terraform@v3
-
-      - name: "\U0001F4D0 Vérifier le formatage Terraform"
-        run: |
-          terraform fmt -recursive -check -diff terraform/
-
-      - name: "\U0001F916 Valider Terraform"
-        run: |
-          cd terraform/environments/dev
           terraform init -backend=false
           terraform validate
+
+  grafana:
+    name: Grafana dashboard JSON
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate dashboard JSON
+        run: python3 -c "import json,glob; [json.load(open(f)) for f in glob.glob('grafana/dashboards/*.json')]; print('ok')"

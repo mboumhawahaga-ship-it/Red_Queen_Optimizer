@@ -1,5 +1,10 @@
 # Journal de Bord - AWS Tagging Governance
 
+> **Note (v2)** : ce journal couvre la première version du projet (modules Terraform `tagged-resources`,
+> Lambda `cleanup`, Step Functions), remplacée par l'architecture actuelle (`infra/` + `lambdas/`).
+> Le code v1 reste consultable dans l'historique git (`git log --all -- terraform/ lambda/`).
+> Il est conservé parce que les erreurs et leçons restent valables.
+
 > Carnet de laboratoire AWS - Erreurs rencontrées, solutions appliquées et lecons retenues.
 > Date : 12 Fevrier 2026 | Region : eu-west-1 (Ireland) | Compte : 123456789012
 

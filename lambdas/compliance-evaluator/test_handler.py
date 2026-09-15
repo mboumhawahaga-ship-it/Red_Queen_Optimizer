@@ -19,6 +19,7 @@ Coverage
   - _fetch_current_tags: EC2, S3 (no-tag-set), RDS, Lambda
   - Notification calls (SNS + Slack paths)
   - DRY_RUN=true suppresses scheduler + quarantine tag writes
+  - CloudWatch metric published for every outcome (compliant/alerted/resolved/quarantined)
 """
 
 import importlib
@@ -27,7 +28,7 @@ import os
 import sys
 import types
 from datetime import datetime, timezone, timedelta
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import boto3
 import pytest
@@ -47,6 +48,7 @@ _SHARED_UTILS.put_governance_record.return_value = None
 _SHARED_UTILS.get_governance_record.return_value = None
 _SHARED_UTILS.send_sns.return_value = True
 _SHARED_UTILS.send_slack.return_value = True
+_SHARED_UTILS.put_governance_metric.return_value = True
 _SHARED_UTILS.tags_list_to_dict.side_effect = lambda t: {x["Key"]: x["Value"] for x in (t or [])}
 
 _SHARED_CONSTANTS.WATCHED_EVENTS = {
@@ -152,6 +154,7 @@ def reset_shared_mocks():
     _SHARED_UTILS.get_governance_record.return_value = None
     _SHARED_UTILS.send_sns.return_value = True
     _SHARED_UTILS.send_slack.return_value = True
+    _SHARED_UTILS.put_governance_metric.return_value = True
     _SHARED_UTILS.tags_list_to_dict.side_effect = lambda t: {x["Key"]: x["Value"] for x in (t or [])}
     yield
     key = "lambdas.compliance_evaluator.handler"
@@ -286,7 +289,7 @@ def test_missing_tags_records_alerted(env):
 def test_critical_resource_uses_36h_sla(env):
     _SHARED_UTILS.classify_resource.return_value = "CRITICAL"
     h = _load_handler()
-    with patch.object(h, "_schedule_sla_check") as mock_sched:
+    with patch.object(h, "_schedule_sla_check"):
         result = h.lambda_handler(_config_event(), None)
     assert result["criticality"] == "CRITICAL"
     deadline_str = result["sla_deadline"]
@@ -339,7 +342,7 @@ def test_sla_resolved_when_now_compliant(env):
     args = _SHARED_UTILS.put_governance_record.call_args
     assert args.args[3] == "resolved"
     assert args.kwargs["extra"]["status"] == "resolved"
-    mock_del.assert_called_once_with(f"rq-sla-i-abc123")
+    mock_del.assert_called_once_with("rq-sla-i-abc123")
 
 
 @mock_aws
@@ -492,8 +495,7 @@ def test_quarantine_tags_ec2(env):
     h = _load_handler()
     ec2 = boto3.client("ec2", region_name=REGION)
     # Create a real EC2 instance via moto
-    ami = ec2.describe_images(Owners=["amazon"])["Images"]
-    # moto provides a default AMI
+    ec2.describe_images(Owners=["amazon"])  # moto provides a default AMI
     reservation = ec2.run_instances(
         ImageId="ami-12345678", MinCount=1, MaxCount=1
     )
@@ -696,3 +698,49 @@ def test_slack_payload_contains_resource_info(env):
     attachment_text = json.dumps(slack_payload)
     assert "i-xyz" in attachment_text
     assert "Owner" in attachment_text or "CostCenter" in attachment_text
+
+
+# ── Metrics ───────────────────────────────────────────────────────────────────
+
+@mock_aws
+def test_compliant_resource_publishes_metric(env):
+    _SHARED_UTILS.check_required_tags.return_value = (True, [])
+    h = _load_handler()
+    h.lambda_handler(_config_event(tags=COMPLIANT_TAGS), None)
+    _SHARED_UTILS.put_governance_metric.assert_called_once_with("compliant", "ec2", "NON_CRITICAL")
+
+
+@mock_aws
+def test_alerted_resource_publishes_metric(env):
+    _SHARED_UTILS.classify_resource.return_value = "CRITICAL"
+    h = _load_handler()
+    h.lambda_handler(_config_event(resource_type="AWS::RDS::DBInstance"), None)
+    _SHARED_UTILS.put_governance_metric.assert_called_once_with("alerted", "rds", "CRITICAL")
+
+
+@mock_aws
+def test_resolved_resource_publishes_metric(env):
+    _SHARED_UTILS.check_required_tags.return_value = (True, [])
+    h = _load_handler()
+    with patch.object(h, "_fetch_current_tags", return_value=COMPLIANT_TAGS), \
+            patch.object(h, "_delete_schedule"):
+        h.lambda_handler(_sla_event(criticality="CRITICAL"), None)
+    _SHARED_UTILS.put_governance_metric.assert_called_once_with("resolved", "ec2", "CRITICAL")
+
+
+@mock_aws
+def test_quarantined_resource_publishes_metric(env):
+    h = _load_handler()
+    with patch.object(h, "_fetch_current_tags", return_value=INCOMPLETE_TAGS), \
+            patch.object(h, "_apply_quarantine_tags"), \
+            patch.object(h, "_delete_schedule"):
+        h.lambda_handler(_sla_event(resource_type="s3"), None)
+    _SHARED_UTILS.put_governance_metric.assert_called_once_with("quarantined", "s3", "NON_CRITICAL")
+
+
+@mock_aws
+def test_skipped_resource_publishes_no_metric(env):
+    _SHARED_UTILS.get_governance_record.return_value = {"status": "handled"}
+    h = _load_handler()
+    h.lambda_handler(_config_event(), None)
+    _SHARED_UTILS.put_governance_metric.assert_not_called()

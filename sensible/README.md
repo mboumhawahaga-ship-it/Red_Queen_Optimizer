@@ -1,38 +1,18 @@
-# Dossier Sensible - Gestion des Secrets
+# sensible/ — secrets for the local Grafana stack
 
-Ce dossier centralise les informations sensibles du projet.
-
-## Fichiers
-
-| Fichier | Description | Dans Git ? |
-|---------|-------------|------------|
-| `.env` | Secrets reels (credentials AWS, mots de passe) | NON (gitignored) |
-| `.env.example` | Template sans valeurs sensibles | OUI |
-
-## Autres fichiers sensibles du projet
-
-Ces fichiers sont proteges par `.gitignore` mais restent dans leurs dossiers respectifs
-(deplacer ces fichiers casserait les outils qui les utilisent) :
-
-| Fichier | Pourquoi sensible | Protection |
-|---------|-------------------|------------|
-| `terraform/environments/dev/terraform.tfstate` | Contient mots de passe RDS, ARN secrets | `.gitignore` (*.tfstate) |
-| `terraform/environments/dev/terraform.tfstate.backup` | Copie de sauvegarde du state | `.gitignore` (*.tfstate.*) |
-| `terraform/environments/dev/*.tfvars` | Variables avec valeurs sensibles | `.gitignore` (*.tfvars) |
-
-## Utilisation
+| File | Purpose | In git? |
+|------|---------|---------|
+| `.env.example` | Template, no real values | yes |
+| `.env` | Real Grafana password + AWS read-only keys | **no** (gitignored) |
 
 ```bash
-# 1. Copier le template
 cp sensible/.env.example sensible/.env
-
-# 2. Editer avec vos vraies valeurs
-nano sensible/.env
-
-# 3. Lancer Docker Compose (il lira automatiquement sensible/.env)
-docker-compose up -d
+# fill in GRAFANA_ADMIN_PASSWORD, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+docker compose up -d        # run from the repository root
 ```
 
-## Bonne pratique recommandee
+The AWS key only needs `cloudwatch:GetMetricData`, `cloudwatch:ListMetrics` and
+`cloudwatch:GetMetricStatistics` — create a dedicated read-only IAM user for it.
 
-Pour les fichiers Terraform state, la meilleure protection est d'utiliser un **backend distant** (S3 + DynamoDB) au lieu de fichiers locaux. Voir `docs/SECURITY.md`.
+Terraform state and `terraform.tfvars` live in `infra/` and are also gitignored.
+For anything beyond a personal sandbox, use a remote backend (S3 + DynamoDB lock).

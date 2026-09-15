@@ -23,6 +23,9 @@ locals {
   # ── Lambda runtime ────────────────────────────────────────────────────────────
   lambda_runtime = "python3.12"
 
+  # ── CloudWatch custom metrics namespace (must match lambdas/shared/constants.py)
+  metrics_namespace = "RedQueen/Governance"
+
   # ── Source paths (relative to infra/) ────────────────────────────────────────
   lambdas_root = "${path.root}/../lambdas"
 

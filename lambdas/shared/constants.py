@@ -37,6 +37,15 @@ VALID_ACTIONS: Set[str] = {"approve", "reject", "tag"}
 
 TTL_DAYS: int = 90
 
+# ── CloudWatch metrics (consumed by the Grafana dashboard) ───────────────────
+
+METRICS_NAMESPACE: str = "RedQueen/Governance"
+METRIC_GOVERNANCE_EVENTS: str = "GovernanceEvents"
+
+# Every outcome of a compliance-evaluator run is published once with this
+# dimension so the dashboard can count alerts, resolutions and quarantines.
+METRIC_OUTCOMES: Set[str] = {"compliant", "alerted", "resolved", "quarantined"}
+
 # ── CloudTrail events watched by auto-tagger ─────────────────────────────────
 
 WATCHED_EVENTS: Dict[str, str] = {
