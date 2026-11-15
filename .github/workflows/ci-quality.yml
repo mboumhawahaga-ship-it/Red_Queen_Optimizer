@@ -23,7 +23,7 @@ jobs:
         run: flake8 lambdas scripts
 
       - name: pytest
-        run: pytest lambdas -q
+        run: pytest lambdas -q --cov=lambdas --cov-branch --cov-report=term-missing --cov-report=xml
 
   terraform:
     name: Terraform fmt + validate
@@ -43,6 +43,10 @@ jobs:
         run: |
           terraform init -backend=false
           terraform validate
+
+      - name: IAM least privilege tests (mocked providers, no AWS)
+        working-directory: infra
+        run: terraform test -no-color
 
   grafana:
     name: Grafana dashboard JSON

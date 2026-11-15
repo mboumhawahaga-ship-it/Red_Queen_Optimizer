@@ -11,6 +11,8 @@ Covers:
 """
 
 import re
+import os
+import fnmatch
 import time
 import json
 import logging
@@ -23,6 +25,7 @@ import boto3
 
 from .constants import (
     REQUIRED_TAGS,
+    PLACEHOLDER_TAG_VALUES,
     CRITICAL_RESOURCE_TYPES,
     TTL_DAYS,
     METRICS_NAMESPACE,
@@ -31,6 +34,32 @@ from .constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def resource_in_governance_scope(resource_id: str, resource_type: str) -> bool:
+    """Skip unlisted workloads before AWS calls; IAM remains the authority.
+
+    Missing configuration preserves compatibility with old local callers.
+    Terraform always supplies the allow-list, including an empty one.
+    """
+    configured = os.environ.get("GOVERNANCE_SCOPE")
+    if configured is None:
+        return True
+    scope = json.loads(configured)
+    region = os.environ.get("GOVERNANCE_REGION", "")
+    account = os.environ.get("GOVERNANCE_ACCOUNT_ID", "")
+    formats = {
+        "ec2": ("ec2_instance_arns", f"arn:aws:ec2:{region}:{account}:instance/{resource_id}"),
+        "s3": ("s3_bucket_arns", f"arn:aws:s3:::{resource_id}"),
+        "rds": ("rds_db_arns", f"arn:aws:rds:{region}:{account}:db:{resource_id}"),
+        "lambda": ("lambda_function_arns", f"arn:aws:lambda:{region}:{account}:function:{resource_id}"),
+    }
+    if resource_type.lower() not in formats:
+        return False
+    key, derived_arn = formats[resource_type.lower()]
+    arn = resource_id if resource_id.startswith("arn:") else derived_arn
+    return any(fnmatch.fnmatchcase(arn, pattern) for pattern in scope.get(key, []))
+
 
 # ── Input sanitization ────────────────────────────────────────────────────────
 
@@ -72,12 +101,17 @@ def tags_dict_to_list(tags: Dict[str, str]) -> List[Dict[str, str]]:
     return [{"Key": k, "Value": v} for k, v in tags.items()]
 
 
+def is_placeholder_value(value: Optional[str]) -> bool:
+    """Reject missing, non-string and known filler values."""
+    return not isinstance(value, str) or value.strip().lower() in PLACEHOLDER_TAG_VALUES
+
+
 def check_required_tags(tags: List[Dict[str, str]]) -> Tuple[bool, List[str]]:
     """
     Return (is_compliant, missing_tag_names).
     """
-    keys = [t.get("Key") for t in tags] if tags else []
-    missing = [t for t in REQUIRED_TAGS if t not in keys]
+    values = tags_list_to_dict(tags)
+    missing = [t for t in REQUIRED_TAGS if is_placeholder_value(values.get(t))]
     return len(missing) == 0, missing
 
 # ── Classification ────────────────────────────────────────────────────────────
@@ -127,6 +161,9 @@ def put_governance_record(
     Write a governance event record to DynamoDB.
     Single persistence function shared by all Lambdas — identical schema everywhere.
     """
+    if dry_run:
+        logger.info("[DRY_RUN] governance event=%s resource=%s", event, sanitize_log_value(resource_id))
+        return
     if not table_name:
         return
     try:
@@ -154,6 +191,7 @@ def put_governance_record(
         boto3.resource("dynamodb").Table(table_name).put_item(Item=item)
     except Exception as exc:
         logger.warning("DynamoDB write error (%s): %s", resource_id, exc)
+        raise
 
 
 def get_governance_record(
@@ -185,6 +223,7 @@ def get_governance_record(
             "ExpressionAttributeValues": {":rid": resource_id},
             "ScanIndexForward": False,
             "Limit": 1,
+            "ConsistentRead": True,
         }
         if event_filter:
             kwargs["FilterExpression"] = "#ev = :ev"
@@ -192,13 +231,18 @@ def get_governance_record(
             kwargs["ExpressionAttributeValues"][":ev"] = event_filter
             kwargs["Limit"] = 20  # filter needs a wider window
 
-        resp = table.query(**kwargs)
-        items = resp.get("Items", [])
-        return items[0] if items else None
+        while True:
+            resp = table.query(**kwargs)
+            items = resp.get("Items", [])
+            if items:
+                return items[0]
+            if not resp.get("LastEvaluatedKey"):
+                return None
+            kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
     except Exception as exc:
         logger.warning("DynamoDB read error (%s): %s", resource_id, exc)
-        return None
+        raise
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 
@@ -256,7 +300,8 @@ def send_slack(webhook_url: str, payload: Dict[str, Any]) -> bool:
 # ── CloudWatch metrics ────────────────────────────────────────────────────────
 
 
-def put_governance_metric(outcome: str, resource_type: str, criticality: str = "UNKNOWN") -> bool:
+def put_governance_metric(outcome: str, resource_type: str, criticality: str = "UNKNOWN", *,
+                          dry_run: bool = False) -> bool:
     """
     Publish one GovernanceEvents datapoint (value=1) to CloudWatch.
 
@@ -266,9 +311,11 @@ def put_governance_metric(outcome: str, resource_type: str, criticality: str = "
       - {Outcome}                              → global counters
       - {Outcome, ResourceType, Criticality}   → breakdown panels
 
-    Metrics are published even in DRY_RUN mode: seeing what *would* happen is
-    the whole point of a dry run. Returns True on success; never raises.
+    Dry runs only log intent. Returns True on success; never raises.
     """
+    if dry_run:
+        logger.info("[DRY_RUN] metric outcome=%s type=%s", outcome, resource_type)
+        return False
     if outcome not in METRIC_OUTCOMES:
         logger.warning("put_governance_metric: unknown outcome %r — skipped", outcome)
         return False

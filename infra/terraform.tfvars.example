@@ -15,8 +15,18 @@ sns_email = "ops-team@example.com"
 slack_webhook_url = ""
 
 # Fallback tag values applied by auto-tagger when a resource has no tags at all.
-default_owner       = "auto-tagger@example.com"
-default_squad       = "unknown"
-default_cost_center = "CC-000"
+default_owner       = ""
+default_squad       = ""
+default_cost_center = ""
 
 log_retention_days = 14
+
+# Least privilege: no workload read/tag access until explicitly configured.
+# Replace these fictitious examples with reviewed ARNs from your own account.
+# Prefer exact ARNs. A resource-name suffix wildcard is an intentional expansion.
+governance_scope = {
+  ec2_instance_arns     = [] # ["arn:aws:ec2:eu-west-1:123456789012:instance/i-0123456789abcdef0"]
+  s3_bucket_arns        = [] # ["arn:aws:s3:::my-approved-bucket"]
+  rds_db_arns           = [] # ["arn:aws:rds:eu-west-1:123456789012:db:my-approved-db"]
+  lambda_function_arns = [] # ["arn:aws:lambda:eu-west-1:123456789012:function:my-approved-function"]
+}

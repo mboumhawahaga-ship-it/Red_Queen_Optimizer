@@ -9,6 +9,12 @@ from typing import Dict, Set, List
 
 REQUIRED_TAGS: List[str] = ["Owner", "Squad", "CostCenter", "Environment"]
 
+# Local policy: reject filler values, without claiming business-directory validation.
+PLACEHOLDER_TAG_VALUES: Set[str] = {
+    "", "unknown", "unassigned", "none", "n/a", "tbd", "todo", "changeme",
+    "cc-000", "auto-tagger@entreprise.com", "auto-tagger@example.com",
+}
+
 # ── Classification ────────────────────────────────────────────────────────────
 
 # Resource types that are always CRITICAL regardless of environment
@@ -26,7 +32,7 @@ SLA_HOURS: Dict[str, int] = {
 # alerted     → notification sent, owner has until sla_deadline
 # resolved    → owner added required tags, resource is now compliant
 # handled     → owner marked resource as intentional (excluded from future evaluations)
-# quarantined → SLA expired, resource has been stopped/throttled/blocked
+# quarantined → SLA expired, resource has been marked with review tags (no stop/delete)
 VALID_STATUSES: Set[str] = {"alerted", "resolved", "handled", "quarantined"}
 
 # ── Feedback actions ──────────────────────────────────────────────────────────
