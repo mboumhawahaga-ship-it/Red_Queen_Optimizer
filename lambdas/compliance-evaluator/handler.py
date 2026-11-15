@@ -28,6 +28,7 @@ import os
 import json
 import logging
 import re
+import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -36,6 +37,7 @@ from botocore.exceptions import ClientError
 
 from ..shared.utils import (
     sanitize_log_value,
+    resource_in_governance_scope,
     check_required_tags,
     classify_resource,
     put_governance_record,
@@ -55,6 +57,7 @@ logger.setLevel(logging.INFO)
 TABLE_NAME       = os.environ.get("GOVERNANCE_TABLE", "")
 SNS_TOPIC_ARN    = os.environ.get("SNS_TOPIC_ARN", "")
 SLACK_WEBHOOK    = os.environ.get("SLACK_WEBHOOK_URL", "")
+SCHEDULER_GROUP  = os.environ.get("SCHEDULER_GROUP_NAME", "default")
 SCHEDULER_ROLE   = os.environ.get("SCHEDULER_ROLE_ARN", "")
 LAMBDA_ARN       = os.environ.get("AWS_LAMBDA_FUNCTION_ARN", "")
 DRY_RUN          = os.environ.get("DRY_RUN", "true").lower() == "true"
@@ -80,6 +83,8 @@ def _handle_compliance_event(event: Dict[str, Any]) -> Dict[str, Any]:
     if not resource_id:
         logger.warning("compliance_event: missing resource_id — skipping")
         return {"status": "skipped", "reason": "missing_resource_id"}
+    if not resource_in_governance_scope(resource_id, resource_type):
+        return {"status": "skipped", "reason": "out_of_scope"}
 
     safe_id   = sanitize_log_value(resource_id)
     safe_type = sanitize_log_value(resource_type)
@@ -90,6 +95,9 @@ def _handle_compliance_event(event: Dict[str, Any]) -> Dict[str, Any]:
 
     # 2. skip if already 'handled'
     existing = get_governance_record(TABLE_NAME, resource_id)
+    feedback = get_governance_record(TABLE_NAME, resource_id, event_filter="feedback")
+    if feedback and feedback.get("status") == "handled":
+        return {"status": "skipped", "reason": "handled"}
     if existing and existing.get("status") == "handled":
         logger.info("resource=%s is handled — skipping evaluation", safe_id)
         return {"status": "skipped", "reason": "handled"}
@@ -103,15 +111,24 @@ def _handle_compliance_event(event: Dict[str, Any]) -> Dict[str, Any]:
             environment=tags_list_to_dict(tags).get("Environment", "unknown"),
             dry_run=DRY_RUN,
         )
-        put_governance_metric("compliant", resource_type, criticality)
+        put_governance_metric("compliant", resource_type, criticality, dry_run=DRY_RUN)
         logger.info("resource=%s is compliant", safe_id)
         return {"status": "compliant", "resource_id": resource_id}
+
+    # Re-delivery must not reset the deadline or send another successful alert.
+    if existing and existing.get("status") == "alerted" and existing.get("sla_deadline"):
+        return {"status": "skipped", "reason": "already_alerted",
+                "sla_deadline": existing["sla_deadline"]}
 
     # 4. SLA
     sla_hours    = SLA_HOURS[criticality]
     now          = datetime.now(timezone.utc)
     sla_deadline = (now + timedelta(hours=sla_hours)).isoformat()
     environment  = tags_list_to_dict(tags).get("Environment", "unknown")
+
+    # Create the durable timer first. On retry, reuse its original deadline.
+    if not DRY_RUN:
+        sla_deadline = _schedule_sla_check(resource_id, resource_type, criticality, sla_deadline, region)
 
     # 5. notify
     _send_alert(
@@ -129,15 +146,12 @@ def _handle_compliance_event(event: Dict[str, Any]) -> Dict[str, Any]:
         extra={"status": "alerted", "sla_deadline": sla_deadline},
     )
 
-    # 7. schedule re-invoke
-    if not DRY_RUN:
-        _schedule_sla_check(resource_id, resource_type, criticality, sla_deadline, region)
-
     # 8. metric
-    put_governance_metric("alerted", resource_type, criticality)
+    put_governance_metric("alerted", resource_type, criticality, dry_run=DRY_RUN)
 
     return {
         "status":       "alerted",
+        "dry_run":      DRY_RUN,
         "resource_id":  resource_id,
         "criticality":  criticality,
         "missing_tags": missing,
@@ -158,8 +172,19 @@ def _handle_sla_deadline(event: Dict[str, Any]) -> Dict[str, Any]:
     if not resource_id:
         logger.warning("sla_deadline: missing resource_id — skipping")
         return {"status": "skipped", "reason": "missing_resource_id"}
+    if not resource_in_governance_scope(resource_id, resource_type):
+        return {"status": "skipped", "reason": "out_of_scope"}
 
     safe_id = sanitize_log_value(resource_id)
+
+    feedback = get_governance_record(TABLE_NAME, resource_id, event_filter="feedback")
+    if feedback and feedback.get("status") == "handled":
+        if schedule_name and not DRY_RUN:
+            _delete_schedule(schedule_name)
+        return {"status": "skipped", "reason": "handled"}
+    deadline = detail.get("sla_deadline")
+    if deadline and datetime.now(timezone.utc) < datetime.fromisoformat(deadline):
+        return {"status": "skipped", "reason": "before_deadline"}
 
     # re-fetch current tags
     tags = _fetch_current_tags(resource_id, resource_type)
@@ -172,7 +197,7 @@ def _handle_sla_deadline(event: Dict[str, Any]) -> Dict[str, Any]:
             dry_run=DRY_RUN,
             extra={"status": "resolved"},
         )
-        put_governance_metric("resolved", resource_type, criticality)
+        put_governance_metric("resolved", resource_type, criticality, dry_run=DRY_RUN)
         logger.info("resource=%s resolved before SLA deadline", safe_id)
         if schedule_name and not DRY_RUN:
             _delete_schedule(schedule_name)
@@ -193,9 +218,9 @@ def _handle_sla_deadline(event: Dict[str, Any]) -> Dict[str, Any]:
     if schedule_name and not DRY_RUN:
         _delete_schedule(schedule_name)
 
-    put_governance_metric("quarantined", resource_type, criticality)
+    put_governance_metric("quarantined", resource_type, criticality, dry_run=DRY_RUN)
     logger.info("resource=%s quarantined (SLA breached)", safe_id)
-    return {"status": "quarantined", "resource_id": resource_id, "missing_tags": missing}
+    return {"status": "quarantined", "resource_id": resource_id, "missing_tags": missing, "dry_run": DRY_RUN}
 
 
 # ── Event parsing ─────────────────────────────────────────────────────────────
@@ -210,11 +235,21 @@ def _extract_event_fields(
     Config shape:  detail.configurationItem.{resourceId, resourceType, tags}
     CloudTrail shape: detail.requestParameters + detail.userIdentity.accountId
     """
-    detail  = event.get("detail", {})
-    account_id = event.get("account", detail.get("userIdentity", {}).get("accountId", "unknown"))
+    detail  = event.get("detail") or {}
+    account_id = event.get("account", (detail.get("userIdentity") or {}).get("accountId", "unknown"))
     region  = event.get("region", "unknown")
 
-    # AWS Config NON_COMPLIANT
+    # Compliance-change events identify the resource but do not carry live tags.
+    evaluation = detail.get("newEvaluationResult") or {}
+    qualifier = (evaluation.get("evaluationResultIdentifier") or {}).get("evaluationResultQualifier") or {}
+    if qualifier:
+        resource_id = qualifier.get("resourceId", "")
+        resource_type = _normalise_config_type(qualifier.get("resourceType", ""))
+        tags = (_fetch_current_tags(resource_id, resource_type)
+                if resource_id and resource_in_governance_scope(resource_id, resource_type) else [])
+        return resource_id, resource_type, tags, region, account_id
+
+    # Legacy configuration-item fixtures / configuration change events.
     config_item = detail.get("configurationItem") or detail.get("newEvaluationResult", {}).get("configurationItem", {})
     if config_item:
         resource_id   = config_item.get("resourceId", "")
@@ -225,7 +260,7 @@ def _extract_event_fields(
 
     # CloudTrail create event
     event_name     = detail.get("eventName", "")
-    request_params = detail.get("requestParameters", {})
+    request_params = (detail.get("requestParameters") or {})
     resource_id    = _extract_cloudtrail_resource_id(event_name, request_params)
     resource_type  = _cloudtrail_resource_type(event_name)
     tags           = _extract_cloudtrail_tags(request_params)
@@ -284,6 +319,9 @@ def _send_alert(
     account_id: str,
     region: str,
 ) -> None:
+    if DRY_RUN:
+        logger.info("[DRY_RUN] would notify resource=%s", sanitize_log_value(resource_id))
+        return
     track  = "FAST" if criticality == "CRITICAL" else "SLOW"
     color  = SLACK_COLORS[track]
     emoji  = TRACK_EMOJI[track]
@@ -294,7 +332,7 @@ def _send_alert(
         f"is missing required tags: {', '.join(missing_tags)}.\n"
         f"SLA: {sla_hours}h — deadline: {sla_deadline}"
     )
-    send_sns(SNS_TOPIC_ARN, subject, sns_body)
+    sns_ok = send_sns(SNS_TOPIC_ARN, subject, sns_body)
 
     slack_payload = {
         "attachments": [{
@@ -311,7 +349,9 @@ def _send_alert(
             "footer": "Red Queen — Tagging Governance",
         }]
     }
-    send_slack(SLACK_WEBHOOK, slack_payload)
+    slack_ok = send_slack(SLACK_WEBHOOK, slack_payload)
+    if (SNS_TOPIC_ARN and not sns_ok) or (SLACK_WEBHOOK and not slack_ok):
+        raise RuntimeError("A configured notification channel failed")
 
 
 # ── EventBridge Scheduler ─────────────────────────────────────────────────────
@@ -320,8 +360,11 @@ _SCHEDULE_NAME_RE = re.compile(r"[^a-zA-Z0-9_-]")
 
 
 def _schedule_name(resource_id: str) -> str:
-    safe = _SCHEDULE_NAME_RE.sub("-", resource_id)[:64]
-    return f"rq-sla-{safe}"
+    safe = _SCHEDULE_NAME_RE.sub("-", resource_id)
+    if safe == resource_id and len(safe) <= 57:
+        return f"rq-sla-{safe}"
+    digest = hashlib.sha256(resource_id.encode("utf-8")).hexdigest()[:16]
+    return f"rq-sla-{safe[:40]}-{digest}"
 
 
 def _schedule_sla_check(
@@ -330,14 +373,17 @@ def _schedule_sla_check(
     criticality: str,
     sla_deadline: str,
     region: str,
-) -> None:
+) -> str:
     if not SCHEDULER_ROLE or not LAMBDA_ARN:
-        logger.warning("SCHEDULER_ROLE_ARN or AWS_LAMBDA_FUNCTION_ARN not set — schedule skipped")
-        return
+        raise RuntimeError("SCHEDULER_ROLE_ARN and AWS_LAMBDA_FUNCTION_ARN are required")
 
     name     = _schedule_name(resource_id)
     # EventBridge Scheduler uses "at()" for one-shot — format: at(yyyy-MM-ddTHH:mm:ss)
-    at_time  = sla_deadline[:19]  # trim microseconds/tz to bare ISO
+    # Round up, not down: an invocation before the deadline must not be lost.
+    target_time = datetime.fromisoformat(sla_deadline).astimezone(timezone.utc)
+    if target_time.microsecond:
+        target_time += timedelta(seconds=1)
+    at_time = target_time.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
 
     payload = {
         "detail-type": "SLADeadline",
@@ -346,12 +392,14 @@ def _schedule_sla_check(
             "resource_type": resource_type,
             "criticality":   criticality,
             "schedule_name": name,
+            "sla_deadline":  sla_deadline,
         },
     }
 
     try:
         boto3.client("scheduler", region_name=region).create_schedule(
             Name=name,
+            GroupName=SCHEDULER_GROUP,
             ScheduleExpression=f"at({at_time})",
             FlexibleTimeWindow={"Mode": "OFF"},
             Target={
@@ -362,13 +410,20 @@ def _schedule_sla_check(
             ActionAfterCompletion="DELETE",
         )
         logger.info("Scheduled SLA check: name=%s at=%s", name, at_time)
+        return sla_deadline
     except ClientError as exc:
-        logger.error("Scheduler create error (%s): %s", resource_id, exc)
+        if exc.response["Error"]["Code"] != "ConflictException":
+            raise
+        schedule = boto3.client("scheduler", region_name=region).get_schedule(Name=name, GroupName=SCHEDULER_GROUP)
+        previous = json.loads(schedule["Target"]["Input"])["detail"]
+        if previous.get("resource_id") != resource_id or previous.get("resource_type") != resource_type:
+            raise RuntimeError("Schedule identity conflict") from exc
+        return previous["sla_deadline"]
 
 
 def _delete_schedule(schedule_name: str) -> None:
     try:
-        boto3.client("scheduler").delete_schedule(Name=schedule_name)
+        boto3.client("scheduler").delete_schedule(Name=schedule_name, GroupName=SCHEDULER_GROUP)
         logger.info("Deleted schedule: %s", schedule_name)
     except ClientError as exc:
         # ConflictException means it was already deleted (ActionAfterCompletion=DELETE race)
@@ -410,20 +465,24 @@ def _apply_quarantine_tags(resource_id: str, resource_type: str) -> None:
             )
         elif resource_type == "rds":
             arn = _rds_arn(resource_id)
+            if not arn:
+                raise RuntimeError("RDS instance ARN is not available")
             if arn:
                 boto3.client("rds").add_tags_to_resource(
                     ResourceName=arn,
                     Tags=quarantine_tags,
                 )
         elif resource_type == "lambda":
+            arn = _lambda_arn(resource_id)
             boto3.client("lambda").tag_resource(
-                Resource=resource_id,
+                Resource=arn,
                 Tags={t["Key"]: t["Value"] for t in quarantine_tags},
             )
         else:
-            logger.warning("_apply_quarantine_tags: unsupported type=%s", resource_type)
+            raise ValueError(f"Unsupported resource type: {resource_type}")
     except ClientError as exc:
         logger.error("quarantine tag error (%s): %s", sanitize_log_value(resource_id), exc)
+        raise
 
 
 def _rds_arn(db_identifier: str) -> Optional[str]:
@@ -433,7 +492,7 @@ def _rds_arn(db_identifier: str) -> Optional[str]:
         return instances[0].get("DBInstanceArn") if instances else None
     except ClientError as exc:
         logger.error("RDS describe error (%s): %s", sanitize_log_value(db_identifier), exc)
-        return None
+        raise
 
 
 # ── Current tag fetch ─────────────────────────────────────────────────────────
@@ -460,16 +519,23 @@ def _fetch_current_tags(resource_id: str, resource_type: str) -> List[Dict[str, 
         if resource_type == "rds":
             arn = _rds_arn(resource_id)
             if not arn:
-                return []
+                raise RuntimeError("RDS instance ARN is not available")
             resp = boto3.client("rds").list_tags_for_resource(ResourceName=arn)
             return resp.get("TagList", [])
 
         if resource_type == "lambda":
-            resp = boto3.client("lambda").list_tags(Resource=resource_id)
+            resp = boto3.client("lambda").list_tags(Resource=_lambda_arn(resource_id))
             raw = resp.get("Tags", {})
             return [{"Key": k, "Value": v} for k, v in raw.items()]
 
     except ClientError as exc:
         logger.error("_fetch_current_tags error (%s): %s", sanitize_log_value(resource_id), exc)
+        raise
 
     return []
+
+
+def _lambda_arn(resource_id: str) -> str:
+    if resource_id.startswith("arn:"):
+        return resource_id
+    return boto3.client("lambda").get_function_configuration(FunctionName=resource_id)["FunctionArn"]

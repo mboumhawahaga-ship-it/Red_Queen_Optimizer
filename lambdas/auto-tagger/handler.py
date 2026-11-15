@@ -27,6 +27,8 @@ from botocore.exceptions import ClientError
 from ..shared.constants import WATCHED_EVENTS
 from ..shared.utils import (
     check_required_tags,
+    is_placeholder_value,
+    resource_in_governance_scope,
     tags_list_to_dict,
     put_governance_record,
     sanitize_log_value,
@@ -40,9 +42,9 @@ logger.setLevel(logging.INFO)
 DRY_RUN             = os.environ.get("DRY_RUN", "true").lower() == "true"
 GOVERNANCE_TABLE    = os.environ.get("GOVERNANCE_TABLE", "")
 DEFAULT_ENVIRONMENT = os.environ.get("DEFAULT_ENVIRONMENT", "dev")
-DEFAULT_SQUAD       = os.environ.get("DEFAULT_SQUAD", "unknown")
-DEFAULT_COST_CENTER = os.environ.get("DEFAULT_COST_CENTER", "CC-000")
-DEFAULT_OWNER       = os.environ.get("DEFAULT_OWNER", "auto-tagger@entreprise.com")
+DEFAULT_SQUAD       = os.environ.get("DEFAULT_SQUAD", "")
+DEFAULT_COST_CENTER = os.environ.get("DEFAULT_COST_CENTER", "")
+DEFAULT_OWNER       = os.environ.get("DEFAULT_OWNER", "")
 
 # ── AWS clients ───────────────────────────────────────────────────────────────
 
@@ -60,7 +62,12 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     logger.info("Auto-tagger started — DRY_RUN=%s", DRY_RUN)
     logger.debug("Event received: %s", json.dumps(event, default=str))
 
-    detail     = event.get("detail", {})
+    detail     = dict(event.get("detail") or {})
+    if detail.get("errorCode"):
+        return {"statusCode": 200, "body": json.dumps({"skipped": "failed_creation"})}
+    # CloudTrail may use JSON null for these sections after failed/redacted calls.
+    for section in ("requestParameters", "responseElements", "userIdentity"):
+        detail[section] = detail.get(section) or {}
     event_name = detail.get("eventName", "")
     service    = WATCHED_EVENTS.get(event_name)
 
@@ -95,6 +102,8 @@ def _handle_ec2(detail: Dict) -> Dict:
         instance_id = item.get("instanceId")
         if not instance_id:
             continue
+        if not resource_in_governance_scope(instance_id, "ec2"):
+            continue
         existing = _get_ec2_tags(instance_id)
         defaults = _build_defaults(detail, instance_id, "ec2")
         missing  = _compute_missing_tags(existing, defaults)
@@ -116,6 +125,8 @@ def _handle_s3(detail: Dict) -> Dict:
                          .get("bucketName", ""))
     if not bucket_name:
         return {"s3": []}
+    if not resource_in_governance_scope(bucket_name, "s3"):
+        return {"s3": []}
 
     existing = _get_s3_tags(bucket_name)
     defaults = _build_defaults(detail, bucket_name, "s3")
@@ -127,7 +138,7 @@ def _handle_s3(detail: Dict) -> Dict:
         missing_tags_to_apply=missing,
         tagger=lambda tags: s3_client.put_bucket_tagging(
             Bucket=bucket_name,
-            Tagging={"TagSet": [{"Key": k, "Value": v} for k, v in tags.items()]}
+            Tagging={"TagSet": [{"Key": k, "Value": v} for k, v in {**existing, **tags}.items()]}
         ),
     )
     return {"s3": [result]}
@@ -137,6 +148,8 @@ def _handle_rds(detail: Dict) -> Dict:
     db_id = (detail.get("requestParameters", {})
                    .get("dBInstanceIdentifier", ""))
     if not db_id:
+        return {"rds": []}
+    if not resource_in_governance_scope(db_id, "rds"):
         return {"rds": []}
 
     db_arn = _rds_arn(db_id)
@@ -165,9 +178,13 @@ def _handle_lambda(detail: Dict) -> Dict:
                        .get("functionName", ""))
     if not func_name:
         return {"lambda": []}
+    if not resource_in_governance_scope(func_name, "lambda"):
+        return {"lambda": []}
 
     func_arn = (detail.get("responseElements", {})
                       .get("functionArn", ""))
+    if not func_arn:
+        func_arn = lambda_client.get_function_configuration(FunctionName=func_name)["FunctionArn"]
     existing = _get_lambda_tags(func_arn) if func_arn else {}
     defaults = _build_defaults(detail, func_name, "lambda")
     missing  = _compute_missing_tags(existing, defaults)
@@ -197,13 +214,17 @@ def _build_defaults(detail: Dict, resource_id: str, resource_type: str) -> Dict[
     caller       = _extract_caller_identity(detail)
 
     return {
-        "Owner":        request_tags.get("Owner", caller or DEFAULT_OWNER),
-        "Squad":        request_tags.get("Squad", DEFAULT_SQUAD),
-        "CostCenter":   request_tags.get("CostCenter", DEFAULT_COST_CENTER),
-        "Environment":  request_tags.get("Environment", DEFAULT_ENVIRONMENT),
+        "Owner":        _first_real_value(request_tags.get("Owner"), caller, DEFAULT_OWNER),
+        "Squad":        _first_real_value(request_tags.get("Squad"), DEFAULT_SQUAD),
+        "CostCenter":   _first_real_value(request_tags.get("CostCenter"), DEFAULT_COST_CENTER),
+        "Environment":  _first_real_value(request_tags.get("Environment"), DEFAULT_ENVIRONMENT),
         "ManagedBy":    "AutoTagger",
         "AutoTaggedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+
+
+def _first_real_value(*values) -> str:
+    return next((value.strip() for value in values if not is_placeholder_value(value)), "")
 
 
 def _compute_missing_tags(existing: Dict[str, str],
@@ -211,65 +232,39 @@ def _compute_missing_tags(existing: Dict[str, str],
     """Returns only the REQUIRED tags absent from existing, with their default values."""
     existing_list = [{"Key": k, "Value": v} for k, v in existing.items()]
     _, missing_names = check_required_tags(existing_list)
-    return {tag: defaults[tag] for tag in missing_names if tag in defaults}
+    return {tag: defaults[tag] for tag in missing_names if not is_placeholder_value(defaults.get(tag))}
 
 
 def _apply_tags(resource_id: str, resource_type: str,
                 existing_tags: Dict[str, str],
-                missing_tags_to_apply: Dict[str, str],
-                tagger) -> Dict:
-    """
-    Applies missing tags (or simulates in DRY_RUN).
-    Persists the result to DynamoDB via put_governance_record.
-    Returns a result dict for the report.
-    """
-    safe_id   = sanitize_log_value(resource_id)
-    safe_type = sanitize_log_value(resource_type)
-
-    result = {
-        "resource_id":   resource_id,
-        "resource_type": resource_type,
-        "tags_added":    list(missing_tags_to_apply.keys()),
-        "dry_run":       DRY_RUN,
-        "status":        "skipped",
-    }
-
-    if not missing_tags_to_apply:
-        result["status"] = "already_compliant"
-        logger.info("[%s] %s — already compliant", safe_type, safe_id)
-        put_governance_record(
-            GOVERNANCE_TABLE, resource_id, resource_type, "auto_tag",
-            compliant=True,
-            environment=DEFAULT_ENVIRONMENT,
-            dry_run=DRY_RUN,
-            extra={"already_compliant": True, "tags_added": []},
-        )
-        return result
-
-    if DRY_RUN:
-        result["status"] = "dry_run"
-        logger.info("[DRY_RUN] [%s] %s — would add: %s",
-                    safe_type, safe_id, list(missing_tags_to_apply.keys()))
-    else:
-        try:
+                missing_tags_to_apply: Dict[str, str], tagger) -> Dict:
+    """Report actual effects separately from planned changes; never write in dry-run."""
+    before_ok, _ = check_required_tags([
+        {"Key": k, "Value": v} for k, v in existing_tags.items()
+    ])
+    added = {}
+    status = "already_compliant" if before_ok else "needs_owner"
+    if missing_tags_to_apply:
+        if DRY_RUN:
+            status = "dry_run"
+        else:
+            # Let AWS failures propagate so asynchronous invocation can retry.
             tagger(missing_tags_to_apply)
-            result["status"] = "tagged"
-            logger.info("[%s] %s — tags applied: %s",
-                        safe_type, safe_id, list(missing_tags_to_apply.keys()))
-        except Exception as exc:
-            result["status"] = "error"
-            result["error"]  = str(exc)
-            logger.error("[%s] %s — tagging error: %s",
-                         safe_type, safe_id, exc)
-
-    tags_added = list(missing_tags_to_apply.keys())
+            added = missing_tags_to_apply
+            status = "tagged"
+    actual = {**existing_tags, **added}
+    compliant, missing = check_required_tags([{"Key": k, "Value": v} for k, v in actual.items()])
+    result = {
+        "resource_id": resource_id, "resource_type": resource_type,
+        "tags_added": list(added), "tags_planned": list(missing_tags_to_apply),
+        "tags_unresolved": missing, "dry_run": DRY_RUN, "status": status,
+    }
     put_governance_record(
         GOVERNANCE_TABLE, resource_id, resource_type, "auto_tag",
-        compliant=False,
-        missing_tags=tags_added,
-        environment=DEFAULT_ENVIRONMENT,
-        dry_run=DRY_RUN,
-        extra={"already_compliant": False, "tags_added": tags_added},
+        compliant=compliant, missing_tags=missing,
+        environment=actual.get("Environment", "unknown"), dry_run=DRY_RUN,
+        extra={"already_compliant": before_ok, "tags_added": list(added),
+               "tags_planned": list(missing_tags_to_apply), "tags_unresolved": missing},
     )
     return result
 
@@ -279,12 +274,8 @@ def _apply_tags(resource_id: str, resource_type: str,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_ec2_tags(instance_id: str) -> Dict[str, str]:
-    try:
-        resp = ec2_client.describe_instances(InstanceIds=[instance_id])
-        raw  = resp["Reservations"][0]["Instances"][0].get("Tags", [])
-        return tags_list_to_dict(raw)
-    except Exception:
-        return {}
+    resp = ec2_client.describe_instances(InstanceIds=[instance_id])
+    return tags_list_to_dict(resp["Reservations"][0]["Instances"][0].get("Tags", []))
 
 
 def _get_s3_tags(bucket_name: str) -> Dict[str, str]:
@@ -298,30 +289,20 @@ def _get_s3_tags(bucket_name: str) -> Dict[str, str]:
 
 
 def _rds_arn(db_identifier: str) -> Optional[str]:
-    """Resolve a DB instance identifier to its canonical ARN via describe_db_instances."""
-    try:
-        resp = rds_client.describe_db_instances(DBInstanceIdentifier=db_identifier)
-        instances = resp.get("DBInstances", [])
-        return instances[0].get("DBInstanceArn") if instances else None
-    except ClientError as exc:
-        logger.error("RDS describe error (%s): %s", sanitize_log_value(db_identifier), exc)
-        return None
+    resp = rds_client.describe_db_instances(DBInstanceIdentifier=db_identifier)
+    instances = resp.get("DBInstances", [])
+    if not instances or not instances[0].get("DBInstanceArn"):
+        raise RuntimeError("RDS instance ARN is not available yet")
+    return instances[0]["DBInstanceArn"]
 
 
 def _get_rds_tags(db_arn: str) -> Dict[str, str]:
-    try:
-        resp = rds_client.list_tags_for_resource(ResourceName=db_arn)
-        return tags_list_to_dict(resp.get("TagList", []))
-    except Exception:
-        return {}
+    resp = rds_client.list_tags_for_resource(ResourceName=db_arn)
+    return tags_list_to_dict(resp.get("TagList", []))
 
 
 def _get_lambda_tags(func_arn: str) -> Dict[str, str]:
-    try:
-        resp = lambda_client.list_tags(Resource=func_arn)
-        return resp.get("Tags", {})
-    except Exception:
-        return {}
+    return lambda_client.list_tags(Resource=func_arn).get("Tags", {})
 
 
 # ══════════════════════════════════════════════════════════════════════════════

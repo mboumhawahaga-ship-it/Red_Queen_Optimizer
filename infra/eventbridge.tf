@@ -13,7 +13,7 @@ resource "aws_cloudwatch_event_rule" "cloudtrail_creates" {
   description = "Routes CloudTrail resource-creation events to auto-tagger only"
 
   event_pattern = jsonencode({
-    source        = ["aws.cloudtrail"]
+    source        = ["aws.ec2", "aws.s3", "aws.rds", "aws.lambda"]
     "detail-type" = ["AWS API Call via CloudTrail"]
     detail = {
       eventName = [
@@ -35,11 +35,12 @@ resource "aws_cloudwatch_event_target" "auto_tagger" {
 }
 
 resource "aws_lambda_permission" "auto_tagger_eventbridge" {
-  statement_id  = "AllowEventBridgeCloudTrailInvoke"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.auto_tagger.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.cloudtrail_creates.arn
+  statement_id   = "AllowEventBridgeCloudTrailInvoke"
+  action         = "lambda:InvokeFunction"
+  function_name  = aws_lambda_function.auto_tagger.function_name
+  principal      = "events.amazonaws.com"
+  source_account = local.account_id
+  source_arn     = aws_cloudwatch_event_rule.cloudtrail_creates.arn
 }
 
 # ── Config NON_COMPLIANT → compliance-evaluator ───────────────────────────────
@@ -68,21 +69,17 @@ resource "aws_cloudwatch_event_target" "compliance_evaluator" {
 }
 
 resource "aws_lambda_permission" "compliance_evaluator_eventbridge" {
-  statement_id  = "AllowEventBridgeConfigInvoke"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.compliance_evaluator.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.config_non_compliant.arn
+  statement_id   = "AllowEventBridgeConfigInvoke"
+  action         = "lambda:InvokeFunction"
+  function_name  = aws_lambda_function.compliance_evaluator.function_name
+  principal      = "events.amazonaws.com"
+  source_account = local.account_id
+  source_arn     = aws_cloudwatch_event_rule.config_non_compliant.arn
 }
 
-# ── EventBridge Scheduler → compliance-evaluator (SLA re-invoke) ─────────────
-# Schedules are created dynamically by compliance-evaluator at alert time;
-# the permission covers all schedules in the default group.
-
-resource "aws_lambda_permission" "compliance_evaluator_scheduler" {
-  statement_id  = "AllowEventBridgeSchedulerInvoke"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.compliance_evaluator.function_name
-  principal     = "scheduler.amazonaws.com"
-  source_arn    = "arn:aws:scheduler:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:schedule/default/*"
+# Same-account Scheduler invocation uses scheduler_execution's identity policy;
+# no broad scheduler service-principal permission on Lambda is required.
+resource "aws_scheduler_schedule_group" "sla" {
+  name = local.scheduler_group
+  tags = { Name = local.scheduler_group }
 }

@@ -143,6 +143,7 @@ def _handle_post(event: Dict[str, Any]) -> Dict[str, Any]:
         "resource_id": resource_id,
         "action":      action,
         "new_status":  new_status,
+        "dry_run":     DRY_RUN,
     })
 
 
@@ -154,7 +155,8 @@ def _parse_body(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not raw:
         return {}
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
     except (json.JSONDecodeError, TypeError):
         return None
 

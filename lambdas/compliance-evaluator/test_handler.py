@@ -266,7 +266,7 @@ def test_compliant_resource_records_scan(env):
 @mock_aws
 def test_missing_tags_sends_alerts(env):
     h = _load_handler()
-    with patch.object(h, "_schedule_sla_check"):
+    with patch.object(h, "_schedule_sla_check", side_effect=lambda *args: args[3]):
         result = h.lambda_handler(_config_event(), None)
     assert result["status"] == "alerted"
     assert result["missing_tags"] == ["Owner", "CostCenter"]
@@ -277,7 +277,7 @@ def test_missing_tags_sends_alerts(env):
 @mock_aws
 def test_missing_tags_records_alerted(env):
     h = _load_handler()
-    with patch.object(h, "_schedule_sla_check"):
+    with patch.object(h, "_schedule_sla_check", side_effect=lambda *args: args[3]):
         h.lambda_handler(_config_event(), None)
     args = _SHARED_UTILS.put_governance_record.call_args
     assert args.args[3] == "alerted"
@@ -289,7 +289,7 @@ def test_missing_tags_records_alerted(env):
 def test_critical_resource_uses_36h_sla(env):
     _SHARED_UTILS.classify_resource.return_value = "CRITICAL"
     h = _load_handler()
-    with patch.object(h, "_schedule_sla_check"):
+    with patch.object(h, "_schedule_sla_check", side_effect=lambda *args: args[3]):
         result = h.lambda_handler(_config_event(), None)
     assert result["criticality"] == "CRITICAL"
     deadline_str = result["sla_deadline"]
@@ -303,7 +303,7 @@ def test_critical_resource_uses_36h_sla(env):
 def test_non_critical_resource_uses_168h_sla(env):
     _SHARED_UTILS.classify_resource.return_value = "NON_CRITICAL"
     h = _load_handler()
-    with patch.object(h, "_schedule_sla_check"):
+    with patch.object(h, "_schedule_sla_check", side_effect=lambda *args: args[3]):
         result = h.lambda_handler(_config_event(), None)
     deadline_str = result["sla_deadline"]
     deadline = datetime.fromisoformat(deadline_str)
@@ -481,11 +481,11 @@ def test_schedule_name_replaces_special_chars(env):
 
 
 @mock_aws
-def test_schedule_name_truncated_to_68_chars(env):
+def test_schedule_name_limited_to_64_chars(env):
     h = _load_handler()
     long_id = "x" * 200
     name = h._schedule_name(long_id)
-    assert len(name) <= 72  # "rq-sla-" (7) + 64 slug chars + margin
+    assert len(name) <= 64
 
 
 # ── _apply_quarantine_tags ────────────────────────────────────────────────────
@@ -587,12 +587,10 @@ def test_quarantine_tags_lambda(env):
 
 
 @mock_aws
-def test_quarantine_tags_unknown_type_logs_warning(env, caplog):
-    import logging
+def test_quarantine_unknown_type_is_rejected(env):
     h = _load_handler()
-    with caplog.at_level(logging.WARNING, logger="lambdas.compliance_evaluator.handler"):
+    with pytest.raises(ValueError, match="Unsupported resource type"):
         h._apply_quarantine_tags("some-id", "unknown_type")
-    assert any("unsupported type" in r.message for r in caplog.records)
 
 
 # ── _fetch_current_tags ───────────────────────────────────────────────────────
@@ -672,7 +670,7 @@ def test_fetch_tags_unknown_type_returns_empty(env):
 def test_send_alert_called_with_correct_track_critical(env):
     _SHARED_UTILS.classify_resource.return_value = "CRITICAL"
     h = _load_handler()
-    with patch.object(h, "_schedule_sla_check"):
+    with patch.object(h, "_schedule_sla_check", side_effect=lambda *args: args[3]):
         h.lambda_handler(_config_event(), None)
     # For CRITICAL, track=FAST → subject should contain emoji ⚠️
     subject_arg = _SHARED_UTILS.send_sns.call_args[0][1]
@@ -683,7 +681,7 @@ def test_send_alert_called_with_correct_track_critical(env):
 def test_send_alert_called_with_correct_track_non_critical(env):
     _SHARED_UTILS.classify_resource.return_value = "NON_CRITICAL"
     h = _load_handler()
-    with patch.object(h, "_schedule_sla_check"):
+    with patch.object(h, "_schedule_sla_check", side_effect=lambda *args: args[3]):
         h.lambda_handler(_config_event(), None)
     subject_arg = _SHARED_UTILS.send_sns.call_args[0][1]
     assert "🔴" in subject_arg or "NON_CRITICAL" in subject_arg
@@ -692,7 +690,7 @@ def test_send_alert_called_with_correct_track_non_critical(env):
 @mock_aws
 def test_slack_payload_contains_resource_info(env):
     h = _load_handler()
-    with patch.object(h, "_schedule_sla_check"):
+    with patch.object(h, "_schedule_sla_check", side_effect=lambda *args: args[3]):
         h.lambda_handler(_config_event(resource_id="i-xyz"), None)
     slack_payload = _SHARED_UTILS.send_slack.call_args[0][1]
     attachment_text = json.dumps(slack_payload)
@@ -707,7 +705,7 @@ def test_compliant_resource_publishes_metric(env):
     _SHARED_UTILS.check_required_tags.return_value = (True, [])
     h = _load_handler()
     h.lambda_handler(_config_event(tags=COMPLIANT_TAGS), None)
-    _SHARED_UTILS.put_governance_metric.assert_called_once_with("compliant", "ec2", "NON_CRITICAL")
+    _SHARED_UTILS.put_governance_metric.assert_called_once_with("compliant", "ec2", "NON_CRITICAL", dry_run=False)
 
 
 @mock_aws
@@ -715,7 +713,7 @@ def test_alerted_resource_publishes_metric(env):
     _SHARED_UTILS.classify_resource.return_value = "CRITICAL"
     h = _load_handler()
     h.lambda_handler(_config_event(resource_type="AWS::RDS::DBInstance"), None)
-    _SHARED_UTILS.put_governance_metric.assert_called_once_with("alerted", "rds", "CRITICAL")
+    _SHARED_UTILS.put_governance_metric.assert_called_once_with("alerted", "rds", "CRITICAL", dry_run=False)
 
 
 @mock_aws
@@ -725,7 +723,7 @@ def test_resolved_resource_publishes_metric(env):
     with patch.object(h, "_fetch_current_tags", return_value=COMPLIANT_TAGS), \
             patch.object(h, "_delete_schedule"):
         h.lambda_handler(_sla_event(criticality="CRITICAL"), None)
-    _SHARED_UTILS.put_governance_metric.assert_called_once_with("resolved", "ec2", "CRITICAL")
+    _SHARED_UTILS.put_governance_metric.assert_called_once_with("resolved", "ec2", "CRITICAL", dry_run=False)
 
 
 @mock_aws
@@ -735,7 +733,7 @@ def test_quarantined_resource_publishes_metric(env):
             patch.object(h, "_apply_quarantine_tags"), \
             patch.object(h, "_delete_schedule"):
         h.lambda_handler(_sla_event(resource_type="s3"), None)
-    _SHARED_UTILS.put_governance_metric.assert_called_once_with("quarantined", "s3", "NON_CRITICAL")
+    _SHARED_UTILS.put_governance_metric.assert_called_once_with("quarantined", "s3", "NON_CRITICAL", dry_run=False)
 
 
 @mock_aws

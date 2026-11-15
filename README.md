@@ -16,7 +16,7 @@ In practice tags go missing all the time: a quick test instance, a bucket create
 
 Make untagged resources impossible to ignore, without blocking engineers:
 
-1. Tag new resources automatically with sensible defaults, at creation time.
+1. Tag new resources automatically with configured values or creator identity; leave unresolved tags missing.
 2. Detect resources that are still missing required tags.
 3. Notify the owner and start an SLA clock.
 4. If the SLA expires, quarantine the resource (tag it `Status=needs-review`) — never delete it.
@@ -70,6 +70,12 @@ Two separate EventBridge rules route CloudTrail events to `auto-tagger` only and
 
 **Required tags:** `Owner`, `Squad`, `CostCenter`, `Environment`
 
+Empty and known filler values (such as `unknown` and `CC-000`) count as missing.
+Owner, Squad and CostCenter defaults are empty. Configure real values only.
+Environment still defaults to the deployment environment: verify this assumption for the monitored account.
+The filler list is a local policy, not a validation against a business directory.
+Existing filler values also require a detection rule or an inventory scan; a Config rule checking keys alone will not find them.
+
 **Criticality** (evaluated in this order):
 
 1. `CriticalWorkload=true` tag → CRITICAL
@@ -94,7 +100,7 @@ Two separate EventBridge rules route CloudTrail events to `auto-tagger` only and
 
 ## Metrics and dashboard
 
-`compliance-evaluator` publishes one `GovernanceEvents` datapoint per run to the `RedQueen/Governance` CloudWatch namespace, with dimensions `Outcome` (compliant / alerted / resolved / quarantined), `ResourceType` and `Criticality`. Metrics are published in dry-run mode too, so the dashboard can be validated before enforcement is switched on.
+`compliance-evaluator` publishes one `GovernanceEvents` datapoint per run to the `RedQueen/Governance` CloudWatch namespace, with dimensions `Outcome` (compliant / alerted / resolved / quarantined), `ResourceType` and `Criticality`. Dry-run logs intent without publishing metrics, notifications, schedules or DynamoDB writes. Use the demo publisher explicitly to populate a test dashboard; it writes to CloudWatch.
 
 The Grafana dashboard (`grafana/dashboards/red-queen-governance.json`) shows those counters over time, the split by outcome, alerts by resource type, quarantines by criticality, and the native `AWS/Billing` estimated charges.
 
@@ -103,7 +109,7 @@ The Grafana dashboard (`grafana/dashboards/red-queen-governance.json`) shows tho
 ## Security
 
 - Customer-managed KMS key with rotation enabled; used for DynamoDB, SNS and all four CloudWatch log groups (log groups are pre-created by Terraform so Lambda never creates unencrypted ones).
-- One IAM role per Lambda (4 roles, 9 inline policies). `PutMetricData` is restricted to the project namespace; `PassRole` to the scheduler is conditioned on `iam:PassedToService`.
+- Separate IAM execution roles for each Lambda and Scheduler. Workload access requires an explicit `governance_scope` allow-list (empty by default). Additive tag APIs restrict writable keys; S3 is limited to approved buckets in the deployment account. See [IAM scope and limitations](docs/IAM_MOINDRE_PRIVILEGE.md).
 - Feedback API routes require AWS IAM (SigV4) authorization. Without it anyone could exempt a resource with `action=approve`.
 - Resource IDs are validated against an allow-list regex before any DynamoDB or log write; the Slack webhook URL must be `https://`.
 - `dry_run = true` by default: Lambdas log intent but write nothing to AWS APIs.
@@ -125,7 +131,7 @@ docs/           engineering journal (errors met, fixes, lessons) — covers the 
 
 ## Quality
 
-- 89 unit tests (pytest + moto): 41 on the compliance evaluator, 31 on the feedback API, 9 on the shared module, plus parametrised cases.
+- Offline tests use pytest + moto, with a network guard and coverage of executable Lambda code (test files are excluded). Run the suite for the current collected count; see `docs/CORRECTIONS_LOCALES.md` for local validation and remaining limitations.
 - CI on every push: flake8, pytest on Python 3.12 (same as the Lambda runtime), `terraform fmt -check`, `terraform validate`, dashboard JSON validation.
 - Single source of truth for names (`infra/locals.tf`) and for governance rules (`lambdas/shared/constants.py`).
 
@@ -134,7 +140,8 @@ docs/           engineering journal (errors met, fixes, lessons) — covers the 
 Prerequisites on the target account and region (not created by this Terraform):
 
 - a CloudTrail trail delivering management events (needed for `auto-tagger` to receive create events),
-- an AWS Config recorder with a `required-tags` managed rule for `Owner`, `Squad`, `CostCenter`, `Environment`.
+- an AWS Config recorder with tagging rules for the monitored types: `required-tags` covers EC2, S3 and RDS; Lambda needs a supported rule such as `lambda-function-tagged`. Configure value checks or a custom evaluation for filler values.
+- reviewed workload ARNs in `governance_scope`: without them, Lambdas skip all workloads, including in dry-run. Select only resources in the deployment account/region (S3 bucket ARNs do not encode region).
 
 ```bash
 # 1. Configure
@@ -149,7 +156,7 @@ terraform apply
 # 3. Run the tests locally
 cd ..
 pip install -r requirements-dev.txt
-pytest lambdas -q
+python -m pytest lambdas -q --cov=lambdas --cov-branch
 
 # 4. Dashboard
 cp sensible/.env.example sensible/.env                     # Grafana password + read-only AWS keys
@@ -157,7 +164,7 @@ docker compose up -d                                       # http://localhost:30
 python scripts/publish_demo_metrics.py                     # optional sample data
 ```
 
-When alerts and the dashboard look right, set `dry_run = false` and re-apply.
+Before enabling enforcement, review `docs/CORRECTIONS_LOCALES.md`, fix remaining production blockers, and validate the event flow in a dedicated AWS sandbox. Dry-run writes only Lambda logs; it does not populate the dashboard or send alerts.
 
 ## What I learned
 

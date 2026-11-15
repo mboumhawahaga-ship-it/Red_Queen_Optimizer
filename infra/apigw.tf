@@ -66,9 +66,11 @@ resource "aws_apigatewayv2_stage" "default" {
 }
 
 resource "aws_lambda_permission" "feedback_api_apigw" {
-  statement_id  = "AllowAPIGatewayInvoke"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.feedback_api.function_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_apigatewayv2_api.feedback.execution_arn}/*/*/feedback"
+  for_each       = toset(["GET", "POST"])
+  statement_id   = "AllowAPIGatewayInvoke${each.value}"
+  action         = "lambda:InvokeFunction"
+  function_name  = aws_lambda_function.feedback_api.function_name
+  principal      = "apigateway.amazonaws.com"
+  source_account = local.account_id
+  source_arn     = "${aws_apigatewayv2_api.feedback.execution_arn}/$default/${each.value}/feedback"
 }

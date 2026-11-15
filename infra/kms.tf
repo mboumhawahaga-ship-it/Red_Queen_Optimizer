@@ -31,8 +31,11 @@ resource "aws_kms_key" "governance" {
         ]
         Resource = "*"
         Condition = {
-          ArnLike = {
-            "kms:EncryptionContext:aws:logs:arn" = "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*"
+          ArnEquals = {
+            "kms:EncryptionContext:aws:logs:arn" = concat(
+              [for name in values(local.lambda_names) : "arn:aws:logs:${local.region}:${local.account_id}:log-group:/aws/lambda/${name}"],
+              ["arn:aws:logs:${local.region}:${local.account_id}:log-group:/aws/apigateway/${local.name_prefix}-feedback"],
+            )
           }
         }
       },
@@ -44,10 +47,13 @@ resource "aws_kms_key" "governance" {
           Service = "sns.amazonaws.com"
         }
         Action = [
-          "kms:GenerateDataKey*",
+          "kms:GenerateDataKey",
           "kms:Decrypt",
         ]
         Resource = "*"
+        Condition = { StringEquals = {
+          "kms:EncryptionContext:aws:sns:topicArn" = local.sns_topic_arn
+        } }
       },
     ]
   })

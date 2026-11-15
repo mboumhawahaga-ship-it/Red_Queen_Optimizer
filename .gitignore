@@ -1,6 +1,5 @@
 # Terraform
 .terraform/
-.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
 *.tfvars
@@ -41,3 +40,8 @@ nul
 .claude/
 .infracost/
 *.log
+
+# Local verification reports
+.coverage
+coverage.xml
+htmlcov/

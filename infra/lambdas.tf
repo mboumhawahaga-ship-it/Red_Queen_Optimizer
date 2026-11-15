@@ -49,12 +49,15 @@ resource "aws_lambda_function" "auto_tagger" {
 
   environment {
     variables = {
-      DRY_RUN             = var.dry_run ? "true" : "false"
-      GOVERNANCE_TABLE    = local.governance_table_name
-      DEFAULT_ENVIRONMENT = var.environment
-      DEFAULT_SQUAD       = var.default_squad
-      DEFAULT_COST_CENTER = var.default_cost_center
-      DEFAULT_OWNER       = var.default_owner
+      DRY_RUN               = var.dry_run ? "true" : "false"
+      GOVERNANCE_TABLE      = local.governance_table_name
+      GOVERNANCE_SCOPE      = jsonencode(var.governance_scope)
+      GOVERNANCE_ACCOUNT_ID = local.account_id
+      GOVERNANCE_REGION     = local.region
+      DEFAULT_ENVIRONMENT   = var.environment
+      DEFAULT_SQUAD         = var.default_squad
+      DEFAULT_COST_CENTER   = var.default_cost_center
+      DEFAULT_OWNER         = var.default_owner
     }
   }
 
@@ -112,11 +115,15 @@ resource "aws_lambda_function" "compliance_evaluator" {
 
   environment {
     variables = {
-      DRY_RUN            = var.dry_run ? "true" : "false"
-      GOVERNANCE_TABLE   = local.governance_table_name
-      SNS_TOPIC_ARN      = aws_sns_topic.governance_alerts.arn
-      SLACK_WEBHOOK_URL  = var.slack_webhook_url
-      SCHEDULER_ROLE_ARN = aws_iam_role.scheduler_execution.arn
+      DRY_RUN               = var.dry_run ? "true" : "false"
+      GOVERNANCE_TABLE      = local.governance_table_name
+      GOVERNANCE_SCOPE      = jsonencode(var.governance_scope)
+      GOVERNANCE_ACCOUNT_ID = local.account_id
+      GOVERNANCE_REGION     = local.region
+      SNS_TOPIC_ARN         = aws_sns_topic.governance_alerts.arn
+      SLACK_WEBHOOK_URL     = var.slack_webhook_url
+      SCHEDULER_ROLE_ARN    = aws_iam_role.scheduler_execution.arn
+      SCHEDULER_GROUP_NAME  = aws_scheduler_schedule_group.sla.name
       # AWS_LAMBDA_FUNCTION_ARN is not set automatically by the runtime;
       # computed from known values to avoid a circular resource reference.
       AWS_LAMBDA_FUNCTION_ARN = local.compliance_evaluator_arn
