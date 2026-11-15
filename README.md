@@ -1,73 +1,81 @@
 # Red Queen Optimizer
 
-**AWS tag governance prototype | Terraform | Python 3.12**
+**A tag-governance prototype for AWS teams**
 
-## Executive summary — STAR
+When cloud resources are missing ownership and cost-center tags, teams can struggle to understand who is responsible for spend. Manual follow-up is easy to miss and harder to manage as an environment grows.
 
-- **Situation:** Missing tags obscure AWS cost ownership.
-- **Task:** Improve governance without blocking engineers or deleting resources.
-- **Action:** Tag selected resources, process Config findings, notify owners, track an SLA, and flag unresolved resources for review.
-- **Result:** A locally tested serverless prototype with scoped IAM and a documented cost model. AWS savings and real-service performance are unmeasured.
+Red Queen helps teams apply and check tags on selected AWS resources, notify owners about gaps, and flag unresolved cases for human review. It is designed to improve cost visibility and governance—not to claim automatic cost savings.
 
-## Architecture
+## Modeled AWS cost
+
+These are **modeled monthly subtotals, not AWS bills or quotes**. They were recalculated from the assumptions and formulas in the [detailed cost estimate](docs/ESTIMATION_COUTS_AWS.md). The model uses official AWS Price List inputs for **Europe (Paris), `eu-west-3`, checked 15 November 2026**, and **does not include Free Tier benefits**.
+
+| Monitored resources | Estimated subtotal / month |
+|---:|---:|
+| 1,000 | **$12.91** |
+| 10,000 | **$76.86** |
+| 100,000 | **$654.44** |
+
+For each 1,000 resources, the model assumes 100 new resources, 4,100 AWS Config rule checks, 1,000 recorded configuration changes, and 100 non-compliance alerts in a 30-day month. It also assumes one follow-up schedule per alert and feedback for one quarter of alerts.
+
+The totals exclude several unknown or customer-dependent charges, including integrated KMS requests, some AWS Config delivery and storage, data transfer, and unverified control-call costs for EC2, RDS, and Lambda. AWS Config recording and rules are external prerequisites. See the [full assumptions, calculations, pricing sources, and exclusions](docs/ESTIMATION_COUTS_AWS.md) before using these figures in a proposal.
+
+## Why it can help
+
+Consistent `Owner`, `Squad`, `CostCenter`, and `Environment` tags can make it easier to group cloud spend, identify responsible teams, and investigate unallocated costs. Automated checks and notifications can also reduce repetitive manual follow-up.
+
+**Illustrative effort calculation—not measured savings:** If a team handles 20 tag follow-ups each month, spending 15 minutes on each, at an assumed loaded labor cost of $40/hour, that work represents 5 hours or **$200/month of labor capacity**. This is only an example of time that might be redirected if the work were reduced. Red Queen has not measured time saved, ROI, or AWS bill reductions.
+
+## How it works
 
 ```mermaid
 flowchart LR
-    CT[CloudTrail] --> E1[EventBridge create rule] --> AT[Lambda auto-tagger]
-    AT --> R[Approved EC2 / S3 / RDS / Lambda]
-    AT --> DB[(DynamoDB)]
-    CFG[AWS Config findings] --> E2[EventBridge compliance rule] --> CE[Lambda evaluator]
-    CE --> SNS[SNS email / optional Slack]
+    CT[CloudTrail creation events] --> EB1[EventBridge]
+    EB1 --> AT[Auto-tagger Lambda]
+    AT --> R[Approved EC2, S3, RDS, Lambda resources]
+    AT --> DB[(DynamoDB history)]
+
+    CFG[AWS Config findings] --> EB2[EventBridge]
+    EB2 --> CE[Compliance evaluator]
+    CE --> N[Email and optional Slack alerts]
     CE --> DB
+    CE --> SCH[Scheduled SLA follow-up]
+    SCH --> CE
+    CE --> R
     CE --> CW[CloudWatch logs and metrics]
-    CE --> S[EventBridge Scheduler SLA check] --> CE
-    O[Owner] --> API[API Gateway, IAM auth] --> FB[Lambda feedback API] --> DB
-    G[Local Grafana] -.-> CW
+
+    OWNER[Resource owner] --> API[Feedback API]
+    API --> DB
 ```
 
-CloudTrail and AWS Config are external prerequisites; separate rules isolate creation and compliance events.
+Event-driven serverless services run when events arrive, rather than relying on a continuously running application server. Separate event routes keep new-resource tagging apart from compliance follow-up. Overdue resources receive review tags; Red Queen does not stop or delete them.
+
+## What is implemented
+
+- Tagging and tag checks for **EC2 instances, S3 buckets, RDS database instances, and Lambda functions**.
+- Required attribution tags and checks for empty or known placeholder values.
+- Notifications, SLA tracking, owner feedback, and governance event history.
+- Tag-based quarantine for human review.
+- Separate IAM roles and an explicit resource allow-list.
+
+## Scope and limitations
+
+- **Dry-run is enabled by default.** It logs intended actions but skips enforcement writes.
+- **`governance_scope` is empty by default.** Workload resources are not in scope until reviewed ARNs are configured.
+- CloudTrail and compatible AWS Config rules must be configured separately.
+- Real AWS end-to-end integration has **not** been tested. Local tests do not verify live service behavior, permissions, or AWS latency.
+- Concurrent events may cause duplicate processing. Concurrent S3 tag updates can overwrite one another because `PutBucketTagging` replaces the bucket's full tag set.
+- No benchmark has been run, and no financial or performance savings have been demonstrated.
 
 ## Technical validation
 
-| Check | Result |
-|---|---|
-| Offline Python tests (pytest/moto, network guard) | **147 passed** |
-| Mocked Terraform policy scenarios | **7 passed, 0 failed** |
-| Terraform formatting and validation | **Passed** |
-| Benchmark / real AWS integration | **Not run** |
+Latest verified local checks:
 
-Local tests only; no AWS integration results. See [validation limits](docs/CORRECTIONS_LOCALES.md) and [IAM boundaries](docs/IAM_MOINDRE_PRIVILEGE.md).
+- **147 Python tests passed** using offline simulations.
+- **7 Terraform scenarios passed** using mocked providers.
+- Terraform formatting, validation, lint, and dashboard JSON checks passed.
 
-## Estimated AWS costs
-
-Recalculated model subtotals use official AWS Price List inputs for **Paris (`eu-west-3`)**, checked **15 November 2026**. Headline estimates exclude Free Tier benefits; they are not quotes or observed bills.
-
-| Resources | No Free Tier | Conditional eligible Free Tier* |
-|---:|---:|---:|
-| 1,000 | **$12.91/month** | about $9.90/month |
-| 10,000 | **$76.86/month** | about $73.81/month |
-| 100,000 | **$654.44/month** | about $651.07/month |
-
-**Monthly workload assumptions (30-day month):** For every 1,000 monitored resources, the model assumes 100 new resources, 4,100 AWS Config checks, 1,000 recorded configuration changes, and 100 alerts. These events lead to about 350 Lambda runs and one scheduled follow-up for each alert. It also assumes that one quarter of alerts receive feedback through the API (one submission and one lookup each), that DynamoDB records average 1 KiB and remain for 90 days, and that logs are kept for 14 days. The estimate includes up to 16 CloudWatch metric series. These are planning assumptions, not measured usage.
-
-Includes one KMS key-month and the priced operations in the [detailed estimate](docs/ESTIMATION_COUTS_AWS.md). Excludes KMS integration calls, unverified EC2/RDS/Lambda control-call charges, transfer and delivery/storage fees, existing workload costs, support, and taxes. Config recording/rules are external, so incremental costs depend on the customer's setup. Defaults are `eu-west-1`, `dry_run = true`, and empty `governance_scope`; Paris assumes overrides.
-
-*Free Tier figures depend on eligibility and unused shared quotas. The [detailed estimate](docs/ESTIMATION_COUTS_AWS.md) has formulas and official sources; recheck prices and account usage before quoting.
-
-## Business value and decisions
-
-`Owner`, `Squad`, `CostCenter`, and `Environment` tags support cost allocation and ownership reporting. Potential time savings are unmeasured; no AWS savings are demonstrated.
-
-- **Serverless:** event-driven Lambdas and managed services.
-- **Least privilege:** separate roles; `governance_scope` is an empty-by-default ARN allow-list.
-- **Dry run:** on by default; no enforcement writes.
-- **Quarantine:** review tags only; no stop or delete.
-
-## Limitations
-
-Real AWS integration testing in an authorized sandbox is still required. CloudTrail and compatible Config rules are external prerequisites. Concurrent events can duplicate work; concurrent S3 updates can lose tags because `PutBucketTagging` replaces the full set. Quarantine is not remediation or a cost-saving action.
-
-**Further reading:** [cost estimate](docs/ESTIMATION_COUTS_AWS.md) · [IAM review](docs/IAM_MOINDRE_PRIVILEGE.md) · [local validation](docs/CORRECTIONS_LOCALES.md) · [engineering journal](docs/JOURNAL_DE_BORD.md)
+These results are local validation—not real AWS integration tests or benchmark results. See [local validation and known risks](docs/CORRECTIONS_LOCALES.md) and the [IAM review](docs/IAM_MOINDRE_PRIVILEGE.md).
 
 ## License
 
