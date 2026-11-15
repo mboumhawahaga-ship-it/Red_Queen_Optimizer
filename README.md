@@ -58,6 +58,12 @@ Event-driven serverless services run when events arrive, rather than relying on 
 - Tag-based quarantine for human review.
 - Separate IAM roles and an explicit resource allow-list.
 
+## Local Performance Benchmark
+
+In an offline benchmark, Red Queen tagged **6,000 of 6,000 simulated resources** across five runs each of 200- and 1,000-event workloads, with **0 errors**. P95 latency was **0.217 ms** and **0.184 ms**, with combined throughput of **7,443** and **7,822 events/second**, respectively.
+
+These are local Python measurements using simulated AWS APIs—not AWS service performance. Real AWS latency and throughput remain unknown. See the [benchmark report, reproduction script, and raw results](docs/BENCHMARK_LOCAL.md).
+
 ## Scope and limitations
 
 - **Dry-run is enabled by default.** It logs intended actions but skips enforcement writes.
@@ -65,7 +71,7 @@ Event-driven serverless services run when events arrive, rather than relying on 
 - CloudTrail and compatible AWS Config rules must be configured separately.
 - Real AWS end-to-end integration has **not** been tested. Local tests do not verify live service behavior, permissions, or AWS latency.
 - Concurrent events may cause duplicate processing. Concurrent S3 tag updates can overwrite one another because `PutBucketTagging` replaces the bucket's full tag set.
-- No benchmark has been run, and no financial or performance savings have been demonstrated.
+- No financial or AWS cost savings have been demonstrated.
 
 ## Technical validation
 
