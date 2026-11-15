@@ -48,7 +48,7 @@ Recalculated model subtotals use official AWS Price List inputs for **Paris (`eu
 | 10,000 | **$76.86/month** | about $73.81/month |
 | 100,000 | **$654.44/month** | about $651.07/month |
 
-**Per 30-day month:** `C=0.1N` creations, `E=4.1N` Config evaluations, `I=N` continuously recorded items, `Q=0.1N` alerts, `0.35N` Lambda invocations, and one Scheduler trigger per alert. Feedback models one POST and GET for 25% of alerts; DynamoDB items are 1 KiB/90 days, logs are retained 14 days, and up to 16 metric series are billed.
+**Monthly workload assumptions (30-day month):** For every 1,000 monitored resources, the model assumes 100 new resources, 4,100 AWS Config checks, 1,000 recorded configuration changes, and 100 alerts. These events lead to about 350 Lambda runs and one scheduled follow-up for each alert. It also assumes that one quarter of alerts receive feedback through the API (one submission and one lookup each), that DynamoDB records average 1 KiB and remain for 90 days, and that logs are kept for 14 days. The estimate includes up to 16 CloudWatch metric series. These are planning assumptions, not measured usage.
 
 Includes one KMS key-month and the priced operations in the [detailed estimate](docs/ESTIMATION_COUTS_AWS.md). Excludes KMS integration calls, unverified EC2/RDS/Lambda control-call charges, transfer and delivery/storage fees, existing workload costs, support, and taxes. Config recording/rules are external, so incremental costs depend on the customer's setup. Defaults are `eu-west-1`, `dry_run = true`, and empty `governance_scope`; Paris assumes overrides.
 
